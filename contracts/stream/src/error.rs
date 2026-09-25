@@ -152,4 +152,13 @@ pub enum Error {
     // --- Arithmetic (top-up) ---
     /// Zero or negative `top_up` amount.
     InvalidTopUp = 31,
+
+    // --- Batch resource limits ---
+    /// `batch_withdraw` received more than `MAX_BATCH_SIZE` (16) stream ids.
+    ///
+    /// The 16-stream ceiling is bounded by Soroban's contract event budget
+    /// (16,384 bytes): each withdrawal emits both a contract and a token
+    /// event (~512 bytes), so a larger batch would exceed event memory limits
+    /// on heavy token contracts. Chunk the ids client-side.
+    BatchSizeExceeded = 32,
 }

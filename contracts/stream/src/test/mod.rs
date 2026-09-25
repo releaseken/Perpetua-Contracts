@@ -31,6 +31,8 @@ mod read_methods_no_side_effects;
 
 // Stage 2
 mod auth;
+// Issue #13: authorization matrix for custom `__check_auth` contract accounts.
+mod auth_matrix;
 mod cancel;
 // Issue #1584: the cancellation event's accounting contract.
 mod amount_domain;
