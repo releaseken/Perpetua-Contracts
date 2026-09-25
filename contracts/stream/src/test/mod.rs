@@ -41,6 +41,7 @@ mod pause;
 mod race_cancel_withdraw;
 mod storage_keys;
 mod terminal_operations;
+// Issue #14: SEP-41 non-standard return values and transfer failure rollbacks.
 mod token_errors;
 mod top_up;
 mod transfer;
@@ -57,6 +58,7 @@ mod lifecycle_proptest;
 mod monotonicity;
 mod release_profile;
 mod resource_limits;
+// Issue #16: extend_stream_ttl clamps to the dynamically queried max_entry_ttl.
 mod ttl;
 
 // Stage 4

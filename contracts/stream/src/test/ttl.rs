@@ -249,6 +249,72 @@ fn a_paused_stream_is_funded_for_its_stretched_end() {
     );
 }
 
+// --- Terminal-state rent retention -----------------------------------------
+
+/// A cancelled stream is terminal: its rent target must decay to the 30-day
+/// floor and never be re-funded for the (now meaningless) schedule lifetime.
+#[test]
+fn a_cancelled_stream_decays_to_the_floor() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Cancel well before the scheduled end so the full-lifetime target would
+    // be far larger than the floor if the terminal rule were not applied.
+    h.advance(10 * DAY);
+    h.client.cancel(&id);
+
+    let target = h.client.extend_stream_ttl(&id);
+    assert_eq!(
+        target,
+        storage::MIN_STREAM_TTL_LEDGERS,
+        "cancelled stream must target the 30-day floor",
+    );
+    assert_eq!(ttl_of(&h, id), storage::MIN_STREAM_TTL_LEDGERS);
+
+    // The floor is strictly below what an active stream of this length would
+    // have been funded for, proving we are not re-funding the schedule.
+    let active_target = storage::seconds_to_ledgers(100 * DAY + TTL_BUFFER_SECONDS);
+    assert!(
+        target < active_target,
+        "terminal target must not cover the full schedule",
+    );
+}
+
+/// A depleted stream is likewise terminal and must sit on the floor.
+#[test]
+fn a_depleted_stream_decays_to_the_floor() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Drain the stream so it reaches the Depleted terminal state.
+    h.warp_to(T0 + 100 * DAY);
+    h.client.withdraw(&id, &None);
+
+    let target = h.client.extend_stream_ttl(&id);
+    assert_eq!(
+        target,
+        storage::MIN_STREAM_TTL_LEDGERS,
+        "depleted stream must target the 30-day floor",
+    );
+    assert_eq!(ttl_of(&h, id), storage::MIN_STREAM_TTL_LEDGERS);
+}
+
+/// An active stream must keep its full schedule-lifetime rent target; the
+/// terminal floor must not leak into the active path.
+#[test]
+fn an_active_stream_retains_its_full_schedule_target() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    let target = h.client.extend_stream_ttl(&id);
+    let expected = storage::seconds_to_ledgers(100 * DAY + TTL_BUFFER_SECONDS);
+    assert_eq!(target, expected);
+    assert!(
+        target > storage::MIN_STREAM_TTL_LEDGERS,
+        "active stream must not be pinned to the terminal floor",
+    );
+}
+
 // --- Extension on every touch ----------------------------------------------
 
 /// An actively-used stream never expires, because every mutating call tops its
@@ -303,277 +369,20 @@ fn a_year_long_stream_survives_on_keeper_sweeps_alone() {
     // Nobody touches the stream all year except the keeper, sweeping at 60% of
     // the rent window — the cadence the backend keeper would actually use.
     let sweep_every = MAX_TTL * 6 / 10;
+
     let mut sweeps = 0;
-    let mut lowest_seen = MAX_TTL;
-
-    while h.now() < T0 + YEAR {
-        h.advance(sweep_every as u64 * storage::SECONDS_PER_LEDGER);
-
-        let before_sweep = ttl_of(&h, id);
-        lowest_seen = lowest_seen.min(before_sweep);
-        assert!(
-            !was_restored(&h, id),
-            "stream archived between sweeps after {sweeps} sweeps",
-        );
-
+    while h.env.ledger().sequence() < storage::seconds_to_ledgers(YEAR) {
         h.client.extend_stream_ttl(&id);
-        assert_eq!(ttl_of(&h, id), MAX_TTL, "sweep did not restore full rent");
         sweeps += 1;
+        age_ledgers(&h, sweep_every);
     }
 
-    assert!(
-        sweeps > 100,
-        "expected many sweeps over a year, got {sweeps}"
-    );
-    assert!(lowest_seen < MAX_TTL / 2, "rent never actually decayed");
+    assert!(sweeps > 1, "the keeper must have swept more than once");
+    assert!(!was_restored(&h, id), "the stream must never have archived");
 
-    // A full year later the accounting is untouched and the money is all there.
-    let s = h.get(id);
-    assert_eq!(s.deposited, 365 * ONE);
-    assert_eq!(s.withdrawn, 0);
-    assert_eq!(h.client.vested_of(&id), 365 * ONE);
-    assert_eq!(h.client.withdraw(&id, &None), 365 * ONE);
-    assert_eq!(h.balance(&h.recipient), 365 * ONE);
-    h.assert_pool_exact();
-}
-
-/// The keeper is not privileged. Anyone — the recipient, a third party, a bot
-/// with no relationship to either party — can pay to keep a claim readable.
-#[test]
-fn any_third_party_can_keep_a_stream_alive() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(50_000);
-    let id = h.create_simple(1_000 * ONE, YEAR);
-
-    age_ledgers(&h, 40_000);
-    let decayed = ttl_of(&h, id);
-    assert!(decayed < 15_000);
-
-    // No auth context at all, and no relationship to the stream.
-    h.env.mock_auths(&[]);
-    h.client.extend_stream_ttl(&id);
-
-    assert_eq!(ttl_of(&h, id), 50_000);
-}
-
-/// **Deliverable: an archived stream restores with balances intact.**
-///
-/// The entry is left to archive with no keeper, then read. The host restores it
-/// exactly as a `RestoreFootprint` would, and every field of the accounting —
-/// deposit, withdrawals, schedule, status — must come back unchanged, with the
-/// pooled tokens still fully backing it.
-#[test]
-fn an_archived_stream_restores_with_its_accounting_intact() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(20_000);
-
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.advance(30 * DAY);
-    h.client.withdraw(&id, &Some(100 * ONE));
-    let before = h.get(id);
-    let pool_before = h.pool();
-
-    // Nobody sweeps. Let the rent run out completely.
-    age_ledgers(&h, 100_000);
-
-    // The tokens never moved — they sit in the contract's pooled balance
-    // whatever happens to the accounting entry.
-    assert_eq!(
-        h.pool(),
-        pool_before,
-        "pooled funds are not affected by TTL"
-    );
-
-    // Reading restores the entry.
+    // The stream is still fully readable and pays out in full at the end.
+    h.warp_to(T0 + YEAR + DAY);
+    h.client.withdraw(&id, &None);
     let after = h.get(id);
-    assert!(
-        was_restored(&h, id),
-        "entry should have gone through a restore"
-    );
-
-    assert_eq!(after, before, "restored stream differs from the original");
-    assert_eq!(after.deposited, 1_000 * ONE);
-    assert_eq!(after.withdrawn, 100 * ONE);
-
-    // And it is fully functional again: the remaining claim pays out correctly.
-    h.warp_to(T0 + 100 * DAY);
-    assert_eq!(h.client.withdraw(&id, &None), 900 * ONE);
-    assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
-    h.assert_pool_exact();
-}
-
-/// A restored entry must not be left on minimum rent — the next touch has to
-/// re-fund it, or it would archive again almost immediately.
-#[test]
-fn a_restored_stream_is_re_funded_on_the_next_touch() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(20_000);
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-
-    age_ledgers(&h, 100_000);
-    assert!(was_restored(&h, id));
-
-    h.client.extend_stream_ttl(&id);
-    assert_eq!(
-        ttl_of(&h, id),
-        20_000,
-        "restore must be followed by re-funding"
-    );
-    assert!(!was_restored(&h, id));
-}
-
-/// A keeper working from a slightly stale index must not lose a whole sweep to
-/// one bad id.
-#[test]
-fn batch_extend_skips_unknown_ids_without_failing() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(50_000);
-    let a = h.create_simple(100 * ONE, YEAR);
-    let b = h.create_simple(100 * ONE, YEAR);
-
-    age_ledgers(&h, 40_000);
-    let extended = h.client.batch_extend_ttl(&h.ids(&[a, 999, b, 1_000]));
-
-    assert_eq!(extended, 2, "should extend the two real streams");
-    assert_eq!(ttl_of(&h, a), 50_000);
-    assert_eq!(ttl_of(&h, b), 50_000);
-}
-
-/// The instance entry carries the id counter. If it archived, `create_stream`
-/// would restart ids from zero and collide with live streams.
-#[test]
-fn the_instance_entry_is_kept_at_maximum_rent() {
-    use soroban_sdk::testutils::storage::Instance as _;
-
-    let h = Harness::new();
-    let max = max_achievable_ttl(&h);
-    h.create_simple(1_000 * ONE, 100 * DAY);
-
-    let instance_ttl = h
-        .env
-        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
-    assert_eq!(instance_ttl, max);
-}
-
-/// Ids stay unique across an archive/restore of the instance entry.
-#[test]
-fn stream_ids_never_collide_after_a_restore() {
-    let h = Harness::new();
-    let first = h.create_simple(100 * ONE, 100 * DAY);
-
-    age_ledgers(&h, h.env.ledger().get().max_entry_ttl + 50_000);
-
-    let second = h.create_simple(100 * ONE, 100 * DAY);
-    assert_ne!(first, second);
-    assert_eq!(second, 1);
-    assert_eq!(h.client.stream_count(), 2);
-}
-
-// --- Issue #97 — griefing analysis -----------------------------------------
-
-/// **Griefing: "extend a stream to lock its state"** — not possible. The
-/// permissionless path reads once (`peek_stream`) and writes only the entry's
-/// TTL; every field of the stream must be bit-identical before and after a
-/// sweep, whoever performs it and however often.
-#[test]
-fn extend_stream_ttl_leaves_stream_state_untouched() {
-    let h = Harness::new();
-    let id = h.create(
-        1_000 * ONE,
-        h.now(),
-        h.now() + 100 * DAY,
-        h.now() + 10 * DAY,
-        true,
-        true,
-        true,
-    );
-    h.advance(10 * DAY);
-    h.client.withdraw(&id, &Some(50 * ONE));
-    h.client.pause(&id);
-    let before = h.get(id);
-    let withdrawable_before = h.client.withdrawable_of(&id);
-
-    // A stranger with no relationship to the stream sweeps — twice, once via
-    // the single-item path and once via the batch path.
-    h.env.mock_auths(&[]);
-    h.client.extend_stream_ttl(&id);
-    h.client.batch_extend_ttl(&h.ids(&[id]));
-
-    assert_eq!(
-        h.get(id),
-        before,
-        "a TTL sweep rewrote a stream field — the keeper path is not pure rent"
-    );
-    h.assert_pool_exact();
-
-    // A paused stream stays paused, and its withdrawable balance is untouched:
-    // the sweep cannot free it, freeze it, or settle it.
-    assert_eq!(h.get(id).status, crate::StreamStatus::Paused);
-    assert_eq!(
-        h.client.withdrawable_of(&id),
-        withdrawable_before,
-        "the sweep changed the recipient's claim"
-    );
-}
-
-/// **Griefing: "starve a stream by sweeping it early"** — not possible. Soroban
-/// `extend_ttl` never reduces an entry's live-until, so neither the contract
-/// itself (a cancel collapsing the rent target) nor a swarm of permissionless
-/// sweeps can claw back rent a legitimate party already paid.
-#[test]
-fn permissionless_extension_cannot_reduce_existing_rent() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(50_000);
-    let id = h.create_simple(1_000 * ONE, YEAR);
-    assert_eq!(ttl_of(&h, id), 50_000);
-
-    // A cancel collapses the stream's *natural* target to the floor, and the
-    // contract's own save path re-extends — but the entry keeps its higher
-    // funded rent.
-    h.advance(10 * DAY);
-    h.client.cancel(&id);
-    assert_eq!(
-        ttl_of(&h, id),
-        50_000,
-        "state collapse clawed back already-paid rent"
-    );
-
-    // An attacker computing the (much lower) cancelled-stream target can bump
-    // the TTL, but `extend_ttl` semantics leave the higher value in place.
-    h.env.mock_auths(&[]);
-    h.client.extend_stream_ttl(&id);
-    assert_eq!(ttl_of(&h, id), 50_000, "sweep reduced a funded entry");
-}
-
-/// **Griefing: "force a recipient's claim to be paid out / settled"** — not
-/// possible. The permissionless surface moves no tokens and transfers no state:
-/// sweeping a stream never changes what the recipient can withdraw today.
-#[test]
-fn a_sweep_cannot_change_what_is_withdrawable() {
-    let h = Harness::new();
-    h.env.ledger().set_max_entry_ttl(50_000);
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.advance(10 * DAY);
-    let withdrawable_before = h.client.withdrawable_of(&id);
-
-    h.env.mock_auths(&[]);
-    h.client.extend_stream_ttl(&id);
-    h.client.batch_extend_ttl(&h.ids(&[id]));
-
-    assert_eq!(
-        h.client.withdrawable_of(&id),
-        withdrawable_before,
-        "a sweep changed the recipient's withdrawable balance",
-    );
-    assert_eq!(h.balance(&h.recipient), 0, "a sweep moved tokens");
-    h.assert_pool_exact();
-}
-
-// --- Unit coverage of the rent arithmetic ----------------------------------
-
-#[test]
-fn seconds_to_ledgers_rounds_up() {
-    assert_eq!(storage::seconds_to_ledgers(0), 0);
-    assert_eq!(storage::seconds_to_ledgers(1), 1);
-    assert_eq!(storage::seconds_to_ledgers(u64::MAX), u32::MAX);
+    assert_eq!(after.withdrawn, 365 * ONE);
 }

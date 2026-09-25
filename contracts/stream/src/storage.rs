@@ -132,6 +132,17 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
     }
 }
 
+/// The network's current maximum entry TTL, in ledgers, queried dynamically
+/// from the Soroban host environment.
+///
+/// `max_entry_ttl` is a network parameter that can change on protocol upgrade,
+/// so it must never be baked in as a compile-time constant. Every TTL target
+/// is clamped against this value at call time, which keeps the rent math
+/// correct even if the network raises or lowers the ceiling.
+pub fn max_entry_ttl(env: &Env) -> u32 {
+    env.storage().max_ttl()
+}
+
 /// How many ledgers this stream's entry should be kept alive for, given the
 /// current time.
 ///
@@ -170,7 +181,9 @@ pub fn ttl_target_ledgers_at(env: &Env, stream: &Stream, now: u64) -> u32 {
     let target = seconds_to_ledgers(remaining.saturating_add(TTL_BUFFER_SECONDS));
     let floored = target.max(MIN_STREAM_TTL_LEDGERS);
 
-    floored.min(env.storage().max_ttl())
+    // Query the network maximum at call time rather than assuming a static
+    // constant, so a protocol upgrade that changes `max_entry_ttl` is honored.
+    floored.min(max_entry_ttl(env))
 }
 
 /// Read the next stream id, defaulting to `0` on a fresh contract.

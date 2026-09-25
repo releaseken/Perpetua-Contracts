@@ -493,3 +493,8 @@ Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a
 > protocol-27 network.
+
+## Handsoff notes
+
+<!-- handsoff-issue-8 -->
+- #8: [Stream State] Discrepancy between StreamStatus::Cancelled vs StreamStatus::Depleted state transitions
