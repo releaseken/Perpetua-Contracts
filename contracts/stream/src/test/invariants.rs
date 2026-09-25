@@ -72,10 +72,28 @@ pub fn assert_conservation_across_lifecycle(stream: &Stream) {
     assert_conservation(stream, cliff);
     // Mid-schedule.
     assert_conservation(stream, start + (end - start) / 2);
-    // At the end: fully vested, nothing refundable.
+    // At the end: fully vested, nothing refundable. This is the zero-dust
+    // boundary: settlement must return the complete deposit to the recipient
+    // entitlement, leaving no refundable residue in storage.
     assert_conservation(stream, end);
+    assert_eq!(
+        accrual::vested(stream, end).expect("vested must succeed at settlement"),
+        stream.deposited,
+        "settled stream must have no unvested dust",
+    );
+    assert_eq!(
+        accrual::refundable(stream, end).expect("refundable must succeed at settlement"),
+        0,
+        "settled stream must have zero refundable dust",
+    );
     // Well past the end: still fully vested, still nothing refundable.
     assert_conservation(stream, end.saturating_add(365 * 86_400));
+    assert_eq!(
+        accrual::refundable(stream, end.saturating_add(365 * 86_400))
+            .expect("refundable must succeed after settlement"),
+        0,
+        "post-settlement stream must retain zero refundable dust",
+    );
 }
 
 /// Assert the state-specific consequences of conservation.
