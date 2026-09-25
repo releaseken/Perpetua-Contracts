@@ -360,6 +360,43 @@ proptest! {
     }
 }
 
+// This is intentionally separate from the environment-controlled sweep
+// above: the accounting guarantee is required to survive a fixed 100,000-case
+// randomized run in CI, independent of a developer's local PROPTEST_CASES.
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100_000))]
+
+    /// A hostile prime deposit may leave a truncation residue at arbitrary
+    /// interior timestamps, but that residue must be exactly refundable and
+    /// must disappear completely at settlement.
+    #[test]
+    fn prime_deposit_has_no_stranded_dust_at_settlement(
+        duration in 2u64..=(20 * 365 * 86_400),
+        elapsed in 0u64..=(40 * 365 * 86_400),
+    ) {
+        const PRIME_DEPOSIT: i128 = 1_000_000_007;
+        let start = 1_700_000_000u64;
+        let end = start + duration;
+        let stream = stream_of(PRIME_DEPOSIT, start, end, start, 0, None);
+        let now = start + elapsed;
+
+        let vested = accrual::vested(&stream, now).expect("prime deposit must not overflow");
+        let refundable = accrual::refundable(&stream, now)
+            .expect("prime deposit complement must not overflow");
+        prop_assert_eq!(vested + refundable, PRIME_DEPOSIT);
+
+        let settled_vested = accrual::vested(&stream, end).expect("settlement must not overflow");
+        let settled_refundable = accrual::refundable(&stream, end)
+            .expect("settlement complement must not overflow");
+        prop_assert_eq!(settled_vested, PRIME_DEPOSIT);
+        prop_assert_eq!(settled_refundable, 0);
+
+        let post_settlement_refundable = accrual::refundable(&stream, end.saturating_add(1))
+            .expect("post-settlement complement must not overflow");
+        prop_assert_eq!(post_settlement_refundable, 0);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Contract level: maximum timestamps through the real entry points
 // ---------------------------------------------------------------------------
@@ -407,6 +444,45 @@ fn contract_handles_maximum_deployable_timestamps_without_a_trap() {
     assert_eq!(h.client.vested_of(&id), deposit);
     assert_eq!(h.client.withdraw(&id, &None), deposit);
     h.assert_pool_exact();
+}
+
+/// Repeated withdrawals may expose a different truncation residue at every
+/// probe, but settlement must still drain the complete prime deposit and leave
+/// no contract balance behind.
+#[test]
+fn prime_deposit_settlement_leaves_zero_pool_dust() {
+    let h = Harness::new();
+    let start = h.now();
+    let duration = 101 * DAY;
+    let end = start + duration;
+    let deposit = 1_000_000_007i128;
+    let id = h.client.create_stream(
+        &h.sender,
+        &h.recipient,
+        &h.token,
+        &deposit,
+        &start,
+        &end,
+        &start,
+        &true,
+        &true,
+        &true,
+    );
+
+    for fraction in [7u64, 19, 43, 71] {
+        h.warp_to(start + duration * fraction / 100);
+        let available = h.client.withdrawable_of(&id);
+        if available > 0 {
+            h.client.withdraw(&id, &None);
+        }
+    }
+
+    h.warp_to(end);
+    assert_eq!(h.client.vested_of(&id), deposit);
+    assert_eq!(h.client.refundable_of(&id), 0);
+    h.client.withdraw(&id, &None);
+    h.assert_pool_exact();
+    assert_eq!(h.pool(), 0, "settlement must leave no pool dust");
 }
 
 /// `create_stream` must reject a deposit whose `deposit * duration` product

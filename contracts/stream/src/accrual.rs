@@ -49,6 +49,11 @@
 //! **I5 — Pause coherence.** `paused_at.is_some()` if and only if
 //! `status == Paused`, and while paused the clock does not advance.
 //!
+//! **I6 — Zero dust at settlement.** For every `t >= end_time`,
+//! `vested(t) == deposited` and `refundable(t) == 0`. Any truncation residue
+//! that exists strictly before maturity is therefore part of the sender's
+//! refundable complement and cannot remain stranded after settlement.
+//!
 //! ## Why I3 is the dangerous one
 //!
 //! I2 is the obvious property and is easy to get right. **I3 is the one that
@@ -182,6 +187,10 @@ pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
     }
 
     let consumed = elapsed(stream, now);
+    // Maturity is an exact terminal boundary. Returning the original deposit
+    // here, instead of evaluating the ratio at the boundary, makes the
+    // zero-dust consequence explicit even when the duration does not divide
+    // the deposit cleanly.
     if consumed >= total_duration {
         return Ok(stream.deposited);
     }
@@ -219,7 +228,9 @@ pub fn withdrawable(stream: &Stream, now: u64) -> Result<i128, Error> {
 
 /// Amount still locked for the recipient's future: deposited minus vested.
 ///
-/// This is what the sender gets back if they cancel at `now`.
+/// This is what the sender gets back if they cancel at `now`. Because this is
+/// the exact complement of [`vested`], all pre-maturity truncation residue is
+/// accounted for, and it is zero at and after maturity.
 pub fn refundable(stream: &Stream, now: u64) -> Result<i128, Error> {
     let earned = vested(stream, now)?;
     stream.deposited.checked_sub(earned).ok_or(Error::Overflow)
