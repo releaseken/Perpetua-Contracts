@@ -492,3 +492,8 @@ Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.
 > **Note for deployment:** the `stellar` CLI must be at least version 27 to match
 > the protocol. A protocol-23 CLI will scaffold and may misreport against a
 > protocol-27 network.
+
+## Handsoff notes
+
+<!-- handsoff-issue-7 -->
+- #7: [Pause & Resume] Sliding end-time drift during cumulative multi-pause cycles
