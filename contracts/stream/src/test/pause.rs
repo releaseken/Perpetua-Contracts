@@ -864,3 +864,153 @@ fn state_machine_paused_for_full_lifetime_resumes_normally() {
     assert_eq!(h.client.vested_of(&id), 500 * ONE);
     h.assert_pool_exact();
 }
+
+/// Same-ledger pause/resume cycles: multiple cycles within the exact same ledger
+/// sequence / timestamp must not double-count `paused_total` or corrupt the clock.
+/// Calling `pause()` while already paused returns `StreamAlreadyPaused`.
+/// Calling `withdraw()` while paused computes exact entitlement up to `paused_at`.
+#[test]
+fn same_ledger_pause_resume_cycles_zero_double_counting() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Advance 30 days so 300 tokens have vested.
+    h.advance(30 * DAY);
+    assert_eq!(h.client.vested_of(&id), 300 * ONE);
+
+    // Rapid same-ledger cycle 1: pause and immediate resume without time advance.
+    h.client.pause(&id);
+    assert_eq!(h.get(id).status, StreamStatus::Paused);
+    assert_eq!(h.get(id).paused_at, Some(T0 + 30 * DAY));
+
+    // A second pause in the exact same ledger must be rejected with StreamAlreadyPaused.
+    assert_eq!(
+        h.client.try_pause(&id).unwrap_err().unwrap(),
+        Error::StreamAlreadyPaused,
+    );
+
+    // Withdraw while paused in the same ledger: exactly 300 tokens vested.
+    assert_eq!(h.client.withdrawable_of(&id), 300 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 300 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+
+    // Resume in the exact same ledger.
+    h.client.resume(&id);
+    assert_eq!(h.get(id).status, StreamStatus::Active);
+    assert_eq!(h.get(id).paused_at, None);
+    assert_eq!(h.get(id).paused_total, 0, "same-ledger pause adds 0 to paused_total");
+
+    // Rapid same-ledger cycles 2, 3, 4 without advancing time:
+    for _ in 0..3 {
+        h.client.pause(&id);
+        assert_eq!(
+            h.client.try_pause(&id).unwrap_err().unwrap(),
+            Error::StreamAlreadyPaused,
+        );
+        h.client.resume(&id);
+        assert_eq!(h.get(id).paused_total, 0, "zero double-counting of paused_total");
+    }
+
+    // Now advance 20 days: from day 30 to day 50. Total vested is now 500 tokens.
+    h.advance(20 * DAY);
+    assert_eq!(h.client.vested_of(&id), 500 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 200 * ONE); // 500 vested - 300 withdrawn
+
+    // Pause at day 50.
+    h.client.pause(&id);
+    assert_eq!(h.get(id).paused_at, Some(T0 + 50 * DAY));
+
+    // Advance 10 days while paused. Entitlement must be strictly clamped to paused_at.
+    h.advance(10 * DAY);
+    assert_eq!(
+        h.client.vested_of(&id),
+        500 * ONE,
+        "vested remains frozen at paused_at despite time advancing",
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        200 * ONE,
+        "withdrawable clamped to paused_at",
+    );
+
+    // Withdraw the 200 tokens while paused.
+    assert_eq!(h.client.withdraw(&id, &None), 200 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+
+    // Advance another 20 days while paused (total 30 days paused).
+    h.advance(20 * DAY);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+
+    // Resume at day 80 (paused from day 50 to day 80 = 30 days).
+    h.client.resume(&id);
+    assert_eq!(
+        h.get(id).paused_total,
+        30 * DAY,
+        "paused_total reflects only the real 30 days paused",
+    );
+
+    // Perform another same-ledger pause/resume cycle immediately after resume.
+    h.client.pause(&id);
+    h.client.resume(&id);
+    assert_eq!(
+        h.get(id).paused_total,
+        30 * DAY,
+        "same-ledger cycle after resume does not increase paused_total",
+    );
+
+    // The schedule stretched by exactly 30 days: original end was 100 days, new end is 130 days.
+    // Advance remaining 50 days (to day 130).
+    h.advance(50 * DAY);
+    assert_eq!(h.client.vested_of(&id), 1_000 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 500 * ONE);
+    assert_eq!(h.client.withdraw(&id, &None), 500 * ONE);
+    assert_eq!(h.balance(&h.recipient), 1_000 * ONE);
+    h.assert_pool_exact();
+}
+
+/// Verify that withdraw() during paused state computes exact vested entitlement
+/// clamped to paused_at across multiple time jumps and partial withdrawals.
+#[test]
+fn withdraw_during_active_pause_clamps_to_paused_at() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+
+    // Accrue for 40 days => 400 tokens vested.
+    h.advance(40 * DAY);
+    h.client.pause(&id);
+    let pause_instant = h.get(id).paused_at.unwrap();
+    assert_eq!(pause_instant, T0 + 40 * DAY);
+
+    // Jump forward multiple ledgers while remaining paused.
+    for jump in [1, 3600, DAY, 10 * DAY, 100 * DAY] {
+        h.advance(jump);
+        assert_eq!(
+            h.client.vested_of(&id),
+            400 * ONE,
+            "vested must clamp to paused_at (+{jump}s)",
+        );
+        assert_eq!(
+            h.client.withdrawable_of(&id),
+            400 * ONE,
+            "withdrawable must clamp to paused_at (+{jump}s)",
+        );
+    }
+
+    // Partial withdrawal while paused.
+    assert_eq!(h.client.withdraw(&id, &Some(150 * ONE)), 150 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 250 * ONE);
+
+    // Further time jumps while paused.
+    h.advance(30 * DAY);
+    assert_eq!(h.client.withdrawable_of(&id), 250 * ONE);
+
+    // Remaining withdrawal while paused.
+    assert_eq!(h.client.withdraw(&id, &None), 250 * ONE);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+
+    // Now nothing left to withdraw while paused.
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+
+    h.assert_pool_exact();
+}

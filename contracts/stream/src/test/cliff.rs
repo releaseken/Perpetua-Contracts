@@ -636,3 +636,53 @@ fn multiple_partial_withdrawals_at_cliff_are_exact() {
 
     h.assert_pool_exact();
 }
+
+/// Boundary verification: post-cliff vesting step vs continuous accrual.
+/// At `cliff_time - 1`, entitlement is strictly 0 and withdrawal fails with NothingToWithdraw.
+/// At `cliff_time`, the recipient is entitled to the full accrued amount since `start_time`.
+#[test]
+fn cliff_boundary_entitlement_step_vs_continuous_accrual() {
+    let h = Harness::new();
+    let start = h.now();
+    let cliff = start + 90 * DAY;
+    let end = start + 360 * DAY;
+    let deposit = 1_200 * ONE;
+    let id = h.create(deposit, start, end, cliff, true, true, true);
+
+    // 1. One second before the cliff: zero entitlement, withdrawal rejected.
+    h.warp_to(cliff - 1);
+    assert_eq!(h.client.vested_of(&id), 0, "entitlement at cliff_time - 1 is 0");
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        0,
+        "withdrawable at cliff_time - 1 is 0"
+    );
+    let err = h.client.try_withdraw(&id, &None).unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingToWithdraw);
+
+    // 2. At the exact cliff instant: unlocks full accrual from start_time (90 days = 300 ONE).
+    h.warp_to(cliff);
+    let expected_cliff_amount = 300 * ONE;
+    assert_eq!(
+        h.client.vested_of(&id),
+        expected_cliff_amount,
+        "full accrual from start_time unlocked at cliff_time",
+    );
+    assert_eq!(
+        h.client.withdrawable_of(&id),
+        expected_cliff_amount,
+        "full accrued amount is withdrawable at cliff_time",
+    );
+    let withdrawn = h.client.withdraw(&id, &None);
+    assert_eq!(withdrawn, expected_cliff_amount);
+    assert_eq!(h.balance(&h.recipient), expected_cliff_amount);
+    assert_eq!(h.client.withdrawable_of(&id), 0);
+
+    // 3. One second after the cliff: continuous linear accrual proceeds seamlessly.
+    h.warp_to(cliff + 1);
+    assert_eq!(
+        h.client.vested_of(&id),
+        expected_cliff_amount + (deposit * 1 / (360 * DAY as i128)),
+    );
+    h.assert_pool_exact();
+}

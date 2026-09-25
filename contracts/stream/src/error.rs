@@ -140,3 +140,9 @@ pub enum Error {
     /// Zero or negative `top_up` amount.
     InvalidTopUp = 31,
 }
+
+impl Error {
+    /// Alias for [`Error::Overflow`] to support explicit arithmetic overflow terminology
+    /// without renumbering or mutating public ABI error discriminants.
+    pub const ArithmeticOverflow: Error = Error::Overflow;
+}

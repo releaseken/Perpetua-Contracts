@@ -524,3 +524,38 @@ fn lifecycle_stays_typed_at_maximum_deployable_timestamps() {
     assert!(s.end_time >= s.start_time, "cancel inverted the schedule");
     h.assert_pool_exact();
 }
+
+/// Verification for Issue #3:
+/// 1. Checked arithmetic used across all accrual mathematical operations.
+/// 2. `Error::ArithmeticOverflow` / `Error::Overflow` emitted gracefully on numeric overflow around 2^127 - 1 bounds.
+/// 3. Never traps or panics on extreme i128 values.
+#[test]
+fn test_accrual_overflow_at_i128_max_boundaries() {
+    let start = 1_000_000u64;
+    let duration = 100_000u64;
+    let max_deposit = i128::MAX; // 2^127 - 1
+
+    let s = stream_of(max_deposit, start, start + duration, start, 0, None);
+
+    // At elapsed = 0: vested is 0, no overflow.
+    assert_eq!(accrual::vested(&s, start).unwrap(), 0);
+
+    // At elapsed >= 2: max_deposit * elapsed strictly exceeds i128::MAX.
+    // Checked arithmetic must catch this and return typed Error::ArithmeticOverflow / Error::Overflow.
+    let res = accrual::vested(&s, start + 2);
+    assert_eq!(res, Err(Error::ArithmeticOverflow));
+    assert_eq!(res, Err(Error::Overflow));
+
+    // Full maturity (elapsed >= duration) returns the deposit directly without dividing.
+    assert_eq!(accrual::vested(&s, start + duration).unwrap(), max_deposit);
+
+    // Withdrawable / refundable / liability under extreme values.
+    let withdrawable = accrual::withdrawable(&s, start);
+    assert_eq!(withdrawable.unwrap(), 0);
+
+    let refundable = accrual::refundable(&s, start + duration);
+    assert_eq!(refundable.unwrap(), 0);
+
+    let liability = accrual::liability(&s);
+    assert_eq!(liability.unwrap(), max_deposit);
+}
