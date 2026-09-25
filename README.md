@@ -497,3 +497,6 @@ Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.
 
 <!-- handsoff-issue-7 -->
 - #7: [Pause & Resume] Sliding end-time drift during cumulative multi-pause cycles
+
+<!-- handsoff-issue-15 -->
+- #15: [Recipient Transfer] Immutable transferable flag check in transfer_recipient
