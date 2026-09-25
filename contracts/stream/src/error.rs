@@ -162,3 +162,9 @@ pub enum Error {
     /// on heavy token contracts. Chunk the ids client-side.
     BatchSizeExceeded = 32,
 }
+
+impl Error {
+    /// Alias for [`Error::Overflow`] to support explicit arithmetic overflow terminology
+    /// without renumbering or mutating public ABI error discriminants.
+    pub const ArithmeticOverflow: Error = Error::Overflow;
+}

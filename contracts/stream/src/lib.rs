@@ -687,7 +687,7 @@ impl FluxoraStream {
         if stream.status.is_terminal() {
             return Err(Error::StreamTerminated);
         }
-        if stream.status == StreamStatus::Paused {
+        if stream.status == StreamStatus::Paused || stream.paused_at.is_some() {
             return Err(Error::StreamAlreadyPaused);
         }
 
