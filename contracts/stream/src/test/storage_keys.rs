@@ -56,6 +56,7 @@
 
 use std::format;
 
+use soroban_sdk::contracttype;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::Env;
@@ -327,6 +328,47 @@ fn deterministic_stream(env: &Env) -> Stream {
     }
 }
 
+/// The pre-packed layout used three independent booleans. This test-only type
+/// lets the rent impact of the packed `flags` byte be measured against that
+/// layout without changing the deployed `Stream` ABI.
+#[contracttype]
+#[derive(Clone)]
+struct LegacyStreamForSize {
+    sender: soroban_sdk::Address,
+    recipient: soroban_sdk::Address,
+    token: soroban_sdk::Address,
+    deposited: i128,
+    withdrawn: i128,
+    start_time: u64,
+    end_time: u64,
+    cliff_time: u64,
+    cancellable: bool,
+    pausable: bool,
+    transferable: bool,
+    paused_at: Option<u64>,
+    paused_total: u64,
+    status: StreamStatus,
+}
+
+fn legacy_stream_for_size(stream: &Stream) -> LegacyStreamForSize {
+    LegacyStreamForSize {
+        sender: stream.sender.clone(),
+        recipient: stream.recipient.clone(),
+        token: stream.token.clone(),
+        deposited: stream.deposited,
+        withdrawn: stream.withdrawn,
+        start_time: stream.start_time,
+        end_time: stream.end_time,
+        cliff_time: stream.cliff_time,
+        cancellable: stream.cancellable(),
+        pausable: stream.pausable(),
+        transferable: stream.transferable(),
+        paused_at: stream.paused_at,
+        paused_total: stream.paused_total,
+        status: stream.status,
+    }
+}
+
 /// The XDR encoding of a [`Stream`] must be deterministic: encoding the same
 /// struct twice must produce identical bytes.
 #[test]
@@ -410,6 +452,49 @@ fn stream_status_encoding_is_stable() {
     assert_eq!(paused, status_xdr_hex(&env, StreamStatus::Paused));
     assert_eq!(cancelled, status_xdr_hex(&env, StreamStatus::Cancelled));
     assert_eq!(depleted, status_xdr_hex(&env, StreamStatus::Depleted));
+}
+
+/// Measure the persistent value size and the saving from packing the three
+/// immutable capability booleans into one byte. Status remains an enum: its
+/// serialized shape is part of the deployed storage ABI and cannot be changed
+/// without a migration for every existing stream entry.
+#[test]
+fn stream_storage_size_reports_packed_flag_savings() {
+    let env = Env::default();
+    let stream = deterministic_stream(&env);
+    let paused = {
+        let mut value = stream.clone();
+        value.paused_at = Some(value.start_time);
+        value.status = StreamStatus::Paused;
+        value
+    };
+
+    let packed_bytes = stream.to_xdr(&env).len();
+    let legacy_bytes = legacy_stream_for_size(&stream).to_xdr(&env).len();
+    let packed_paused_bytes = paused.to_xdr(&env).len();
+    let legacy_paused_bytes = legacy_stream_for_size(&paused).to_xdr(&env).len();
+    let flag_saving = legacy_bytes - packed_bytes;
+    let status_bytes = status_xdr_hex(&env, StreamStatus::Active).len() / 2;
+
+    std::println!(
+        "Stream XDR bytes: packed={packed_bytes}, legacy={legacy_bytes}, \
+         saving={flag_saving}; paused packed={packed_paused_bytes}, \
+         legacy={legacy_paused_bytes}; status={status_bytes}",
+    );
+
+    assert!(
+        legacy_bytes > packed_bytes,
+        "packed flags must reduce the serialized stream value"
+    );
+    assert_eq!(
+        flag_saving, 16,
+        "three bool ScVals should become one u8/U32 ScVal, saving 16 bytes"
+    );
+    assert_eq!(
+        legacy_bytes - packed_bytes,
+        legacy_paused_bytes - packed_paused_bytes,
+        "flag packing saving must not depend on paused_at presence"
+    );
 }
 
 // ─── Old-fixture compatibility ───────────────────────────────────────────────

@@ -56,9 +56,25 @@ while [[ $# -gt 0 ]]; do
 done
 
 latest_ledger() {
-    curl -s -m 10 -X POST "$RPC_URL" -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' |
-        python3 -c 'import sys,json;print(json.load(sys.stdin)["result"]["sequence"])'
+    local response
+    response=$(curl -sS -m 10 -X POST "$RPC_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}') || {
+        echo "RPC request failed: $RPC_URL" >&2
+        return 1
+    }
+    printf '%s' "$response" | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if "error" in payload:
+    raise SystemExit("RPC error: " + str(payload["error"]))
+sequence = payload.get("result", {}).get("sequence")
+if not isinstance(sequence, int) or sequence <= 0:
+    raise SystemExit("RPC response did not contain a valid ledger sequence")
+print(sequence)
+'
 }
 
 # JSON output function
@@ -82,6 +98,23 @@ say() {
 
 NOW=$(latest_ledger)
 REMAINING=$((LIVE_UNTIL_LEDGER - NOW))
+TARGET_REACHED=false
+ALERT_MESSAGE=""
+if (( NOW >= LIVE_UNTIL_LEDGER )); then
+    TARGET_REACHED=true
+    ALERT_MESSAGE="Canary target ledger $LIVE_UNTIL_LEDGER reached (current: $NOW)"
+fi
+
+if [[ "$TARGET_REACHED" == "true" ]] && ! command -v stellar >/dev/null 2>&1; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        output_json "error" "stellar CLI is required to inspect the archived entry" \
+            "\"current_ledger\": $NOW, \"target_reached\": true, \"alert\": \"$ALERT_MESSAGE\""
+    else
+        echo "ALERT: $ALERT_MESSAGE"
+        echo "stellar CLI is required to inspect the canary entry after the target ledger." >&2
+    fi
+    exit 2
+fi
 
 # Determine entry state
 if (( REMAINING > 0 )); then
@@ -99,10 +132,24 @@ else
     EXIT_CODE=0
 fi
 
+if [[ "$RESTORE" == "true" && "$STATE" == "PENDING_EVICTION" ]]; then
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        output_json "error" "Restore requested before the canary was archived" \
+            "\"current_ledger\": $NOW, \"target_reached\": $TARGET_REACHED, \"state\": \"$STATE\""
+    else
+        echo "Restore requested, but the canary is still readable and eviction is pending." >&2
+        echo "Wait for the entry to archive, then retry --restore." >&2
+    fi
+    exit 2
+fi
+
 # Output status
 if [[ "$JSON_OUTPUT" == "true" ]]; then
     # JSON mode
-    DATA="\"current_ledger\": $NOW, \"target_eviction_ledger\": $LIVE_UNTIL_LEDGER, \"planted_at_ledger\": $PLANTED_AT_LEDGER, \"remaining_ledgers\": $REMAINING, \"state\": \"$STATE\""
+    DATA="\"current_ledger\": $NOW, \"target_eviction_ledger\": $LIVE_UNTIL_LEDGER, \"planted_at_ledger\": $PLANTED_AT_LEDGER, \"remaining_ledgers\": $REMAINING, \"target_reached\": $TARGET_REACHED, \"state\": \"$STATE\""
+    if [[ "$TARGET_REACHED" == "true" ]]; then
+        DATA+=", \"alert\": \"$ALERT_MESSAGE\""
+    fi
     output_json "success" "$STATE_DESCRIPTION" "$DATA"
 else
     # Human-readable format
@@ -117,6 +164,10 @@ else
  remaining    ledgers: $REMAINING
  state        $STATE — $STATE_DESCRIPTION
 BANNER
+
+    if [[ "$TARGET_REACHED" == "true" ]]; then
+        printf ' ALERT       %s\n' "$ALERT_MESSAGE"
+    fi
 
     if [[ "$STATE" == "ACTIVE" ]]; then
         printf ' status       ALIVE — %d ledgers left (~%.1f days)\n\n' \

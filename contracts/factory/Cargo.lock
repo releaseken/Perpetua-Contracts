@@ -776,6 +776,14 @@ checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 name = "fluxora-factory"
 version = "1.0.0"
 dependencies = [
+ "fluxora-stream",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "fluxora-stream"
+version = "1.0.0"
+dependencies = [
  "soroban-sdk",
 ]
 

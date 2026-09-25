@@ -211,5 +211,35 @@ TTL targets convert seconds to ledgers at a nominal 5s close time
 (`storage::SECONDS_PER_LEDGER`). Close time is a network property that drifts.
 The constant is deliberately conservative — it over-estimates ledgers per unit
 time, so entries are funded for longer than strictly needed — but a sustained
-slowdown well beyond 5s/ledger would erode the margin. The 30-day buffer and the
-keeper path both exist to absorb that.
+slowdown well beyond 5s/ledger would erode the margin. The 30-day minimum and
+its 10% drift headroom are intended to absorb that, while the keeper path keeps
+long-lived streams funded even when the network runs slow enough that the
+contract's rent target is effectively stretched out in wall-clock time.
+
+### Sensitivity analysis
+
+The minimum stream TTL floor is computed from a nominal 30-day target, but the
+actual wall-clock coverage varies with the real ledger close time.
+
+| ledger close time | nominal 30-day floor in ledgers | wall-clock coverage of the floor |
+|---|---:|---:|
+| 4.8s/ledger | 518,400 | 28.8 days |
+| 5.0s/ledger | 518,400 | 30.0 days |
+| 5.2s/ledger | 518,400 | 31.2 days |
+
+The contract applies a 10% drift safety margin to that base floor, so the actual
+minimum is:
+
+`MIN_STREAM_TTL_LEDGERS ≈ 30 days × 1.10 ÷ 5s/ledger ≈ 570,240 ledgers`
+
+At the worst of the drift examples above, that gives roughly:
+
+| ledger close time | effective wall-clock coverage with 10% headroom |
+|---|---:|
+| 4.8s/ledger | ~31.7 days |
+| 5.0s/ledger | ~33.0 days |
+| 5.2s/ledger | ~34.3 days |
+
+This is not a guarantee of constant 30-day coverage under every network regime,
+but it does keep the floor materially above the nominal target and buys the
+keeper a wider window before a settled stream becomes vulnerable to archive.

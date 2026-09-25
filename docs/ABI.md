@@ -119,7 +119,11 @@ Discriminants are ABI and are never renumbered; new variants are appended.
 | 11 | `StreamNotActive` | | 24 | `StreamIdExhausted` |
 | 12 | `StreamNotPaused` | | 25 | `TokenTransferFailed` |
 | 13 | `StreamAlreadyPaused` | | 26 | `TokenMissing` |
+| | | | 27 | `DelegateNotPermitted` |
+| | | | 28 | `DelegateExpired` |
 | | | | 29 | `MalformedStreamId` |
+| | | | 30 | `RepeatedTransfer` |
+| | | | 31 | `InvalidTopUp` |
 
 `TokenTransferFailed` (25) and `TokenMissing` (26) are **stable stream-level categories** for token sub-invocation failures. The token contract's internal error discriminant is intentionally discarded — forwarding it would produce a value clients decode against Perpetua's error table, yielding a silent misinterpretation. The raw diagnostic is visible in the failed transaction's `diagnosticEvents`.
 
@@ -187,6 +191,8 @@ is the snake_case event name, second is always `stream_id`.
 |---|---|---|
 | `stream_created` | `stream_id`, `sender`, `recipient` | `token`, `deposited`, `start_time`, `end_time`, `cliff_time`, `cancellable`, `pausable`, `transferable` |
 | `withdrawn` | `stream_id`, `recipient` | `amount`, `withdrawn`, `deposited`, `status` |
+
+`stream_created` is the bootstrap event indexers use to reconstruct a stream's initial state. It is the only source of the per-stream metadata needed to build a sender/recipient mapping before any later lifecycle event arrives.
 | `cancelled` | `stream_id`, `sender`, `recipient` | `refunded`, `vested`, `withdrawn`, `end_time` |
 | `paused` | `stream_id`, `sender` | `paused_at`, `paused_total` |
 | `resumed` | `stream_id`, `sender` | `paused_duration`, `paused_total` |
@@ -304,6 +310,14 @@ view calls combined into one derived figure (for example checking
 
 **2. Handle archived streams.** `stream_exists(id) == false` while
 `id < stream_count()` means the entry has been archived, not that it never
-existed. Surface a restore action rather than an error. See
-[KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) §1.
+existed. Surface a restore action rather than an error. The recovery workflow is:
+
+1. Check `stream_count()` and `stream_exists(id)` in one ledger snapshot.
+2. If `!stream_exists(id)` and `id < stream_count()`, treat it as archived.
+3. Tell the user the stream is archived and show a restore action.
+4. Re-submit the read or mutating call with a `RestoreFootprint` so the
+   persistent entry is recovered before retrying.
+5. After the restore succeeds, re-run the call and continue normally.
+
+See [KNOWN-LIMITATIONS.md](KNOWN-LIMITATIONS.md) §1.
 

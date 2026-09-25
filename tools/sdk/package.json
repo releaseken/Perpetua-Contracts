@@ -4,9 +4,29 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "generate": "tsx ../tools/sdk_generator.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.2",
     "vitest": "^2.0.0"
+  },
+  "description": "",
+  "main": "index.ts",
+  "types": "index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./events": "./generated/perpetua-events.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@stellar/stellar-sdk": "^17.1.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
   }
 }

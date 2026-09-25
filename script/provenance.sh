@@ -15,7 +15,8 @@
 #   script/provenance.sh test                       # run the tool's regression suite
 #
 # Each contract is its own standalone Cargo project (no shared workspace).
-# `build` compiles every contract under contracts/ and manifests them all.
+# `build` compiles every contract under contracts/ from clean target directories,
+# then manifests and verifies the product release output for stream.
 # The release dir defaults to contracts/stream/target/<FLUXORA_WASM_TARGET>/release
 # (FLUXORA_WASM_TARGET defaults to wasm32v1-none, per rust-toolchain.toml).
 # All commands are idempotent: re-run after a rebuild to regenerate, or after
@@ -30,13 +31,13 @@ TOOL_DIR="$ROOT/tools/provenance"
 TOOL="$TOOL_DIR/target/release/fluxora-provenance"
 
 build_tool() {
-  (cd "$TOOL_DIR" && cargo build --release --quiet)
+  (cd "$TOOL_DIR" && cargo clean && cargo build --release --quiet)
 }
 
 build_contracts() {
   for dir in "$ROOT"/contracts/*/; do
     echo "== $(basename "$dir") =="
-    (cd "$dir" && cargo build --target "$TARGET" --release)
+    (cd "$dir" && cargo clean --target "$TARGET" && cargo build --target "$TARGET" --release)
   done
 }
 

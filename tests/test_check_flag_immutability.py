@@ -2,7 +2,7 @@
 tests/test_check_flag_immutability.py
 
 Test suite for script/check-flag-immutability.py — the static verification that
-`cancellable`, `pausable` and `transferable` cannot be mutated post-creation.
+the packed capability flags cannot be mutated post-creation.
 
 Builds a tiny synthetic stream crate tree (lib.rs/types.rs) in tmp_path and
 asserts the script's pass/fail behaviour for each structural violation class.
@@ -46,11 +46,7 @@ impl FluxoraStream {
     pub fn create_stream(
         env: Env, cancellable: bool, pausable: bool, transferable: bool,
     ) -> Result<u64, Error> {
-        let stream = Stream {
-            cancellable,
-            pausable,
-            transferable,
-        };
+        let stream = Stream { flags: Stream::flags_from_parts(cancellable, pausable, transferable) };
         Ok(0)
     }
 
@@ -66,12 +62,8 @@ impl FluxoraStream {
 
 GOOD_TYPES = """\
 pub struct Stream {
-    /// Fixed at creation, never mutable.
-    pub cancellable: bool,
-    /// Fixed at creation, never mutable.
-    pub pausable: bool,
-    /// Fixed at creation, never mutable.
-    pub transferable: bool,
+    /// Fixed at creation, never mutable. Packed capability bits.
+    pub flags: u8,
 }
 """
 
@@ -114,7 +106,7 @@ def test_clean_source_passes(patch_src_root: Path) -> None:
 def test_assignment_in_a_mutating_fn_fails(patch_src_root: Path) -> None:
     bad = GOOD_LIB.replace(
         "            return Err(Error::NotPausable);\n        }\n        Ok(())",
-        "            return Err(Error::NotPausable);\n        }\n        stream.cancellable = false;\n        Ok(())",
+        "            return Err(Error::NotPausable);\n        }\n        stream.flags = 0;\n        Ok(())",
     )
     _write_lib(patch_src_root, bad)
     assert _run() == 1
@@ -123,7 +115,7 @@ def test_assignment_in_a_mutating_fn_fails(patch_src_root: Path) -> None:
 def test_assignment_in_a_view_fn_fails(patch_src_root: Path) -> None:
     bad = GOOD_LIB.replace(
         "        Ok(0)",
-        "        stream.pausable = true;\n        Ok(0)",
+        "        stream.flags = 1;\n        Ok(0)",
     )
     _write_lib(patch_src_root, bad)
     assert _run() == 1
@@ -132,7 +124,7 @@ def test_assignment_in_a_view_fn_fails(patch_src_root: Path) -> None:
 def test_assignment_without_spaces_fails(patch_src_root: Path) -> None:
     bad = GOOD_LIB.replace(
         "        Ok(0)",
-        "        stream.transferable=false;\n        Ok(0)",
+        "        stream.flags=false;\n        Ok(0)",
     )
     _write_lib(patch_src_root, bad)
     assert _run() == 1
@@ -142,7 +134,7 @@ def test_only_assignments_fail_not_comparisons(patch_src_root: Path) -> None:
     # A comparison (==) must not trip the assignment detector.
     bad = GOOD_LIB.replace(
         "        if !stream.pausable {",
-        "        if stream.pausable == true || !stream.pausable {",
+        "        if stream.flags == 1 || !stream.pausable {",
     )
     _write_lib(patch_src_root, bad)
     assert _run() == 0
@@ -155,14 +147,17 @@ def test_only_assignments_fail_not_comparisons(patch_src_root: Path) -> None:
 def test_initialization_outside_create_stream_fails(patch_src_root: Path) -> None:
     bad = GOOD_LIB.replace(
         "    pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {\n        let mut stream = storage::load_stream(&env, stream_id)?;",
-        "    pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {\n        let rebuilt = Stream {\n            cancellable,\n            pausable,\n            transferable,\n        };\n        let mut stream = storage::load_stream(&env, stream_id)?;",
+        "    pub fn pause(env: Env, stream_id: u64) -> Result<(), Error> {\n        let rebuilt = Stream { flags: 0 };\n        let mut stream = storage::load_stream(&env, stream_id)?;",
     )
     _write_lib(patch_src_root, bad)
     assert _run() == 1
 
 
 def test_missing_initializer_fails(patch_src_root: Path) -> None:
-    bad = GOOD_LIB.replace("            cancellable,\n            pausable,\n            transferable,\n", "")
+    bad = GOOD_LIB.replace(
+        "        let stream = Stream { flags: Stream::flags_from_parts(cancellable, pausable, transferable) };\n",
+        "        let stream = Stream { };\n",
+    )
     _write_lib(patch_src_root, bad)
     assert _run() == 1
 
@@ -181,7 +176,7 @@ def test_removing_immutable_doc_fails(patch_src_root: Path) -> None:
 def test_removing_a_field_declaration_fails(patch_src_root: Path) -> None:
     types = patch_src_root / "types.rs"
     content = types.read_text(encoding="utf-8")
-    types.write_text(content.replace("    pub transferable: bool,\n", ""), encoding="utf-8")
+    types.write_text(content.replace("    pub flags: u8,\n", ""), encoding="utf-8")
     assert _run() == 1
 
 

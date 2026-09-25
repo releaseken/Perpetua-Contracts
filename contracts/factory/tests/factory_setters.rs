@@ -1,19 +1,50 @@
 //! Direct unit tests for `FluxoraFactory` admin setters and config views.
 //!
 //! Covers issue #684: `set_admin`, `set_cap`, `set_min_duration`, `set_allowlist`,
-//! `is_allowlisted`, and `get_factory_config` — including auth enforcement,
+//! token allowlisting, `is_allowlisted`, and `get_factory_config` — including auth enforcement,
 //! `NotInitialized` / `AlreadyInitialized` branches, and admin rotation.
 
 #![cfg(test)]
 
 use fluxora_factory::{
-    load_policy, FactoryError, FactoryPolicy, FluxoraFactory, FluxoraFactoryClient,
+    derive_stream_salt, load_policy, FactoryError, FactoryPolicy, FluxoraFactory,
+    FluxoraFactoryClient,
 };
 use soroban_sdk::{
+    contract, contractimpl,
     testutils::{Address as _, Ledger, MockAuth, MockAuthInvoke},
-    Address, Env, IntoVal,
+    Address, BytesN, Env, IntoVal,
 };
+use std::collections::BTreeSet;
 use std::panic::AssertUnwindSafe;
+
+fn stream_hash(env: &Env) -> BytesN<32> {
+    BytesN::from_array(env, &[7; 32])
+}
+
+#[test]
+fn test_stream_salt_is_unique_across_ten_thousand_creations() {
+    let env = Env::default();
+    let sender = Address::generate(&env);
+    let mut salts = BTreeSet::new();
+
+    for stream_id in 0..10_000u64 {
+        let salt = derive_stream_salt(&env, &sender, 0, stream_id);
+        assert!(salts.insert(salt.to_array()), "salt collision at {stream_id}");
+    }
+}
+
+#[test]
+fn test_stream_salt_changes_when_any_tuple_component_changes() {
+    let env = Env::default();
+    let sender = Address::generate(&env);
+    let other_sender = Address::generate(&env);
+    let base = derive_stream_salt(&env, &sender, 1, 1);
+
+    assert_ne!(base, derive_stream_salt(&env, &other_sender, 1, 1));
+    assert_ne!(base, derive_stream_salt(&env, &sender, 2, 1));
+    assert_ne!(base, derive_stream_salt(&env, &sender, 1, 2));
+}
 
 // ---------------------------------------------------------------------------
 // init — happy path and error branches
@@ -29,13 +60,49 @@ fn test_init_happy_path() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &5_000, &200);
+    factory.init(&admin, &sc, &stream_hash(&env), &5_000, &200);
 
     let cfg = factory.get_factory_config();
     assert_eq!(cfg.admin, admin);
     assert_eq!(cfg.stream_contract, sc);
     assert_eq!(cfg.max_deposit, 5_000);
     assert_eq!(cfg.min_duration, 200);
+    assert_eq!(cfg.stream_wasm_hash, stream_hash(&env));
+}
+
+/// The reviewed hash is part of the policy consumed by creation paths.
+#[test]
+fn test_load_policy_includes_stream_wasm_hash() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    factory.init(&admin, &sc, &stream_hash(&env), &5_000, &200);
+
+    let policy = env
+        .as_contract(&fid, || load_policy(&env))
+        .expect("policy should load after init");
+    assert_eq!(policy.stream_wasm_hash, stream_hash(&env));
+}
+
+/// Governance can rotate the reviewed hash through the admin setter.
+#[test]
+fn test_set_stream_wasm_hash_round_trip() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    let new_hash = BytesN::from_array(&env, &[9; 32]);
+
+    factory.init(&admin, &sc, &stream_hash(&env), &5_000, &200);
+    factory.set_stream_wasm_hash(&new_hash);
+
+    assert_eq!(factory.get_factory_config().stream_wasm_hash, new_hash);
 }
 
 /// Calling `init` a second time returns `AlreadyInitialized`.
@@ -48,8 +115,8 @@ fn test_init_double_returns_already_initialized() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
-    let result = factory.try_init(&admin, &sc, &1_000, &10);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
+    let result = factory.try_init(&admin, &sc, &stream_hash(&env), &1_000, &10);
     assert_eq!(result, Err(Ok(FactoryError::AlreadyInitialized)));
 }
 
@@ -89,6 +156,10 @@ fn test_setters_before_init_return_not_initialized() {
         Err(Ok(FactoryError::NotInitialized))
     );
     assert_eq!(
+        factory.try_set_stream_wasm_hash(&stream_hash(&env)),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
         factory.try_set_cap(&1_000),
         Err(Ok(FactoryError::NotInitialized))
     );
@@ -97,7 +168,19 @@ fn test_setters_before_init_return_not_initialized() {
         Err(Ok(FactoryError::NotInitialized))
     );
     assert_eq!(
+        factory.try_set_max_duration(&100),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
         factory.try_set_allowlist(&addr, &true),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_token_allowed(&addr, &true),
+        Err(Ok(FactoryError::NotInitialized))
+    );
+    assert_eq!(
+        factory.try_set_pause(&true),
         Err(Ok(FactoryError::NotInitialized))
     );
 }
@@ -115,7 +198,7 @@ fn test_set_admin_updates_config() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let new_admin = Address::generate(&env);
     factory.set_admin(&new_admin);
@@ -131,7 +214,7 @@ fn test_set_admin_new_admin_can_call_setters() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let new_admin = Address::generate(&env);
     factory.set_admin(&new_admin);
@@ -149,7 +232,7 @@ fn test_set_admin_same_address_noop() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     factory.set_admin(&admin);
     assert_eq!(factory.get_factory_config().admin, admin);
@@ -168,7 +251,7 @@ fn test_set_cap_round_trip() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     factory.set_cap(&7_500);
     assert_eq!(factory.get_factory_config().max_deposit, 7_500);
@@ -187,10 +270,42 @@ fn test_set_min_duration_round_trip() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     factory.set_min_duration(&300);
     assert_eq!(factory.get_factory_config().min_duration, 300);
+}
+
+#[test]
+fn test_duration_bounds_validate_and_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    factory.init(&admin, &sc, &10_000, &3_600);
+
+    factory.set_max_duration(&10_000);
+    factory.validate_duration(&0, &3_600);
+    factory.validate_duration(&0, &10_000);
+    assert_eq!(
+        factory.try_validate_duration(&0, &3_599),
+        Err(Ok(FactoryError::InvalidDuration))
+    );
+    assert_eq!(
+        factory.try_validate_duration(&0, &10_001),
+        Err(Ok(FactoryError::InvalidDuration))
+    );
+    assert_eq!(
+        factory.try_validate_duration(&10, &9),
+        Err(Ok(FactoryError::InvalidDuration))
+    );
+
+    assert_eq!(
+        factory.try_set_max_duration(&3_599),
+        Err(Ok(FactoryError::InvalidDuration))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +321,7 @@ fn test_is_allowlisted_default_false() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let recipient = Address::generate(&env);
     assert!(!factory.is_allowlisted(&recipient));
@@ -221,7 +336,7 @@ fn test_set_allowlist_add() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let recipient = Address::generate(&env);
     factory.set_allowlist(&recipient, &true);
@@ -238,7 +353,7 @@ fn test_set_allowlist_remove() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let recipient = Address::generate(&env);
     factory.set_allowlist(&recipient, &true);
@@ -255,11 +370,94 @@ fn test_set_allowlist_remove_non_allowlisted_noop() {
     let factory = FluxoraFactoryClient::new(&env, &fid);
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let recipient = Address::generate(&env);
     factory.set_allowlist(&recipient, &false); // never added — should not panic
     assert!(!factory.is_allowlisted(&recipient));
+}
+
+// ---------------------------------------------------------------------------
+// token allowlist / is_token_allowed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_token_allowlist_add_remove_and_validate() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    let token = Address::generate(&env);
+    factory.init(&admin, &sc, &10_000, &100);
+
+    assert!(!factory.is_token_allowed(&token));
+    assert_eq!(
+        factory.try_validate_token(&token),
+        Err(Ok(FactoryError::TokenNotAllowed))
+    );
+
+    factory.set_token_allowed(&token, &true);
+    assert!(factory.is_token_allowed(&token));
+    factory.validate_token(&token);
+
+    factory.set_token_allowed(&token, &false);
+    assert!(!factory.is_token_allowed(&token));
+}
+
+// ---------------------------------------------------------------------------
+// set_pause / is_factory_paused
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_set_pause_updates_policy() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    factory.init(&admin, &sc, &10_000, &100);
+
+    assert!(!factory.is_factory_paused());
+    factory.set_pause(&true);
+    assert!(factory.is_factory_paused());
+    assert!(factory.get_factory_config().creation_paused);
+    factory.set_pause(&false);
+    assert!(!factory.is_factory_paused());
+}
+
+// ---------------------------------------------------------------------------
+// per-sender creation rate limit
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_record_creation_enforces_sender_window_and_resets() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    let sender = Address::generate(&env);
+    factory.init(&admin, &sc, &10_000, &100);
+    factory.set_rate_limit(&2, &10);
+    assert_eq!(
+        factory.try_set_rate_limit(&0, &10),
+        Err(Ok(FactoryError::InvalidRateLimit))
+    );
+
+    factory.record_creation(&sender);
+    factory.record_creation(&sender);
+    assert_eq!(
+        factory.try_record_creation(&sender),
+        Err(Ok(FactoryError::RateLimitExceeded))
+    );
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 10);
+    factory.record_creation(&sender);
 }
 
 // ---------------------------------------------------------------------------
@@ -288,7 +486,7 @@ fn test_set_admin_rejects_non_admin() {
     let sc = Address::generate(&env);
 
     env.mock_all_auths();
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     env.mock_auths(&[MockAuth {
         address: &non_admin,
@@ -314,7 +512,7 @@ fn test_set_stream_contract_rejects_non_admin() {
     let new_sc = Address::generate(&env);
 
     env.mock_all_auths();
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     env.mock_auths(&[MockAuth {
         address: &non_admin,
@@ -339,7 +537,7 @@ fn test_set_cap_rejects_non_admin() {
     let sc = Address::generate(&env);
 
     env.mock_all_auths();
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     env.mock_auths(&[MockAuth {
         address: &non_admin,
@@ -364,7 +562,7 @@ fn test_set_min_duration_rejects_non_admin() {
     let sc = Address::generate(&env);
 
     env.mock_all_auths();
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     env.mock_auths(&[MockAuth {
         address: &non_admin,
@@ -376,6 +574,32 @@ fn test_set_min_duration_rejects_non_admin() {
         },
     }]);
     assert_auth_fails(|| factory.set_min_duration(&500));
+}
+
+/// `set_pause` rejects a non-admin caller.
+#[test]
+fn test_set_pause_rejects_non_admin() {
+    let env = Env::default();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+
+    env.mock_all_auths();
+    factory.init(&admin, &sc, &10_000, &100);
+
+    env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &fid,
+            fn_name: "set_pause",
+            args: (true,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert_auth_fails(|| factory.set_pause(&true));
+    assert!(!factory.is_factory_paused());
 }
 
 /// `set_allowlist` rejects a non-admin caller.
@@ -390,7 +614,7 @@ fn test_set_allowlist_rejects_non_admin() {
     let recipient = Address::generate(&env);
 
     env.mock_all_auths();
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     env.mock_auths(&[MockAuth {
         address: &non_admin,
@@ -423,7 +647,7 @@ fn test_init_bumps_instance_ttl() {
     let sc = Address::generate(&env);
 
     // Initialize the factory — this should bump instance TTL.
-    factory.init(&admin, &sc, &5_000, &200);
+    factory.init(&admin, &sc, &stream_hash(&env), &5_000, &200);
 
     // Verify config is immediately accessible after init.
     let cfg = factory.get_factory_config();
@@ -456,7 +680,7 @@ fn test_setters_bump_instance_ttl() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Test set_admin bumps TTL.
     let new_admin = Address::generate(&env);
@@ -517,7 +741,7 @@ fn test_repeated_setter_calls_prevent_expiration() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Simulate a busy factory: repeatedly advance and call setters.
     for i in 0..5 {
@@ -534,14 +758,9 @@ fn test_repeated_setter_calls_prevent_expiration() {
     assert_eq!(cfg.max_deposit, 10_400); // last update
 }
 
-/// Test that config remains accessible after many idlereads.
-///
-/// This test verifies that simple read operations (like `is_factory_paused`)
-/// do NOT bump TTL (they are read-only), so a truly idle factory will
-/// eventually expire. However, the first setter after the idle period
-/// should successfully bump TTL and restore accessibility.
+/// Test that policy reads refresh the factory instance TTL.
 #[test]
-fn test_idle_factory_recovers_on_first_setter() {
+fn test_policy_reads_refresh_instance_ttl() {
     let env = Env::default();
     env.mock_all_auths();
     let fid = env.register_contract(None, FluxoraFactory);
@@ -549,27 +768,43 @@ fn test_idle_factory_recovers_on_first_setter() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
     assert_eq!(factory.get_factory_config().max_deposit, 10_000);
 
-    // Simulate an idle period: don't call any setters, just advance ledger.
-    // The instance entries may approach expiration but should not yet expire
-    // if the TTL bump from init was sufficient.
+    // Read operations refresh the instance entry before the next idle period.
     env.ledger()
         .set_sequence_number(env.ledger().sequence() + 10_000);
 
-    // A read operation (read-only, no TTL bump) should still work.
+    // This read must extend the policy entry's lifetime.
     let paused = factory.is_factory_paused();
     assert!(!paused);
 
-    // Now call a setter — this should successfully bump TTL.
-    factory.set_cap(&15_000);
-    assert_eq!(factory.get_factory_config().max_deposit, 15_000);
-
-    // Advance ledger again and verify config is still accessible.
+    // A second long interval remains safe because the read refreshed TTL.
     env.ledger()
-        .set_sequence_number(env.ledger().sequence() + 5_000);
-    assert_eq!(factory.get_factory_config().max_deposit, 15_000);
+        .set_sequence_number(env.ledger().sequence() + 10_000);
+    assert_eq!(factory.get_factory_config().max_deposit, 10_000);
+}
+
+/// An allowlist read refreshes the corresponding persistent entry.
+#[test]
+fn test_allowlist_reads_refresh_persistent_ttl() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sc = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
+    factory.set_allowlist(&recipient, &true);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 10_000);
+
+    assert!(factory.is_allowlisted(&recipient));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 10_000);
+    assert!(factory.is_allowlisted(&recipient));
 }
 
 /// Test that set_rate_bounds bumps instance TTL.
@@ -582,7 +817,7 @@ fn test_set_rate_bounds_bumps_instance_ttl() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Set rate bounds — this should bump TTL.
     factory.set_rate_bounds(&Some(50), &Some(5_000));
@@ -622,7 +857,7 @@ fn test_load_policy_reflects_initial_state() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let policy = env
         .as_contract(&fid, || load_policy(&env))
@@ -640,6 +875,8 @@ fn test_load_policy_reflects_initial_state() {
         policy.max_rate_per_second, None,
         "no rate bounds by default"
     );
+    assert_eq!(policy.max_active_streams, u32::MAX);
+    assert_eq!(policy.active_streams, 0);
 }
 
 /// Applying each policy setter (cap / min_duration / stream_contract /
@@ -655,7 +892,7 @@ fn test_load_policy_reflects_all_setters() {
     let sc = Address::generate(&env);
 
     // Initial cap/min_duration
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Replace each policy axis through its setter and verify via load_policy.
     let new_sc = Address::generate(&env);
@@ -691,7 +928,7 @@ fn test_load_policy_defaults_rate_bounds_to_none() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
 
     let policy = env
         .as_contract(&fid, || load_policy(&env))
@@ -719,7 +956,7 @@ fn test_load_policy_reflects_batch_cap_toggle() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
     assert!(
         env.as_contract(&fid, || load_policy(&env))
             .unwrap()
@@ -752,7 +989,7 @@ fn test_load_policy_reflects_pause_toggle() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
     assert!(
         !env.as_contract(&fid, || load_policy(&env))
             .unwrap()
@@ -786,7 +1023,7 @@ fn test_load_policy_equality_is_struct_equality() {
     let admin = Address::generate(&env);
     let sc = Address::generate(&env);
 
-    factory.init(&admin, &sc, &10_000, &100);
+    factory.init(&admin, &sc, &stream_hash(&env), &10_000, &100);
     factory.set_rate_bounds(&Some(10), &Some(100));
 
     let p1 = env.as_contract(&fid, || load_policy(&env)).unwrap();
@@ -802,6 +1039,91 @@ fn test_load_policy_equality_is_struct_equality() {
     let mut different = p1.clone();
     different.max_deposit += 1;
     assert_ne!(p1, different);
+}
+
+// ---------------------------------------------------------------------------
+// Active-stream capacity
+// ---------------------------------------------------------------------------
+
+#[test]
+fn active_stream_cap_blocks_creation_until_terminal_release() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let stream_id = env.register_contract(None, StreamStub);
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    factory.init(&admin, &stream_id, &10_000, &100);
+    factory.set_max_active_streams(&1);
+
+    factory.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &1_000,
+        &0,
+        &100,
+        &0,
+        &true,
+        &true,
+        &true,
+    );
+    assert_eq!(factory.get_factory_config().active_streams, 1);
+
+    assert_eq!(
+        factory
+            .try_create_stream(
+                &sender,
+                &recipient,
+                &token,
+                &1_000,
+                &0,
+                &100,
+                &0,
+                &true,
+                &true,
+                &true,
+            )
+            .unwrap_err()
+            .unwrap(),
+        FactoryError::CapacityCapExceeded
+    );
+
+    factory.stream_terminated(&0);
+    assert_eq!(factory.get_factory_config().active_streams, 0);
+    factory.create_stream(
+        &sender,
+        &recipient,
+        &token,
+        &1_000,
+        &0,
+        &100,
+        &0,
+        &true,
+        &true,
+        &true,
+    );
+}
+
+#[test]
+fn max_active_streams_is_admin_configurable() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let fid = env.register_contract(None, FluxoraFactory);
+    let factory = FluxoraFactoryClient::new(&env, &fid);
+    let admin = Address::generate(&env);
+    let stream_contract = Address::generate(&env);
+
+    factory.init(&admin, &stream_contract, &10_000, &100);
+    factory.set_max_active_streams(&25);
+
+    let config = factory.get_factory_config();
+    assert_eq!(config.max_active_streams, 25);
+    assert_eq!(config.active_streams, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -826,11 +1148,11 @@ fn test_set_admin_same_ledger_old_admin_fails() {
         invoke: &MockAuthInvoke {
             contract: &fid,
             fn_name: "init",
-            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            args: (&old_admin, &sc, &stream_hash(&env), 10_000i128, 100u64).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    factory.init(&old_admin, &sc, &10_000, &100);
+    factory.init(&old_admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Rotate to new_admin using old_admin's auth
     env.mock_auths(&[MockAuth {
@@ -881,11 +1203,11 @@ fn test_set_admin_same_ledger_new_admin_succeeds() {
         invoke: &MockAuthInvoke {
             contract: &fid,
             fn_name: "init",
-            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            args: (&old_admin, &sc, &stream_hash(&env), 10_000i128, 100u64).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    factory.init(&old_admin, &sc, &10_000, &100);
+    factory.init(&old_admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Rotate to new_admin using old_admin's auth
     env.mock_auths(&[MockAuth {
@@ -935,11 +1257,11 @@ fn test_set_admin_same_ledger_multiple_setters() {
         invoke: &MockAuthInvoke {
             contract: &fid,
             fn_name: "init",
-            args: (&old_admin, &sc, 10_000i128, 100u64).into_val(&env),
+            args: (&old_admin, &sc, &stream_hash(&env), 10_000i128, 100u64).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    factory.init(&old_admin, &sc, &10_000, &100);
+    factory.init(&old_admin, &sc, &stream_hash(&env), &10_000, &100);
 
     // Rotate to new_admin
     env.mock_auths(&[MockAuth {

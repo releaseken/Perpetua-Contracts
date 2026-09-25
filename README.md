@@ -479,6 +479,7 @@ Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.
 | | |
 |---|---|
 | [docs/ABI.md](docs/ABI.md) | **Interface of record.** Frozen 2026-08-12. Read this before integrating. |
+| [docs/gas.md](docs/gas.md) | Factory policy-overhead benchmark, resource breakdown, and reproduction command. |
 | [docs/griefing-analysis-extend-ttl.md](docs/griefing-analysis-extend-ttl.md) | Issue #97: formal audit of the permissionless TTL keeper surface. |
 | [docs/KNOWN-LIMITATIONS.md](docs/KNOWN-LIMITATIONS.md) | What a green suite does not prove. |
 | [docs/MIGRATION.md](docs/MIGRATION.md) | Deletion audit vs the pre-rewrite contract, and downstream impact. |
@@ -495,8 +496,5 @@ Migrating from the pre-rewrite contract? See [docs/MIGRATION.md](docs/MIGRATION.
 
 ## Handsoff notes
 
-<!-- handsoff-issue-7 -->
-- #7: [Pause & Resume] Sliding end-time drift during cumulative multi-pause cycles
-
-<!-- handsoff-issue-15 -->
-- #15: [Recipient Transfer] Immutable transferable flag check in transfer_recipient
+<!-- handsoff-issue-8 -->
+- #8: [Stream State] Discrepancy between StreamStatus::Cancelled vs StreamStatus::Depleted state transitions

@@ -18,6 +18,7 @@ name = "fluxora-factory"
 description = "Parameter-gated stream factory for Perpetua"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/hannyloveworld/Perpetua-Contracts"
 publish = false
@@ -33,6 +34,7 @@ testutils = ["soroban-sdk/testutils"]
 soroban-sdk = "27.0.5"
 
 [dev-dependencies]
+fluxora-stream = { path = "../stream" }
 soroban-sdk = { version = "27.0.5", features = ["testutils"] }
 
 [profile.release]

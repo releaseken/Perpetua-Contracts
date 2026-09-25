@@ -108,7 +108,7 @@ write). Example:
     "toolchain_channel": "1.97.1",
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
     "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
-    "soroban_sdk": "27.0.5",
+    "soroban_sdk": "27.0.6",
     "host": "x86_64-unknown-linux-gnu",
     "started_on": "2026-08-26T19:33:43Z"
   }
@@ -121,13 +121,13 @@ write). Example:
 | `subject[].name` / `.sha256` | release dir scan | every `*.wasm` present, hex SHA-256 |
 | `build.build_type` | constant | this repo's provenance schema URL |
 | `build.target` | CLI `--target` | wasm target triple |
-| `build.profile` | workspace `Cargo.toml` `[profile.release]` | release flags, verbatim |
+| `build.profile` | release project's `Cargo.toml` `[profile.release]` | release flags, verbatim |
 | `build.git_revision` | `git rev-parse HEAD` | the exact source commit |
 | `build.git_ref` | `git branch --show-current` | branch, if any (context only) |
 | `build.git_dirty` | `git status --porcelain` | whether the tree had uncommitted changes at build time |
 | `build.toolchain_channel` | `rust-toolchain.toml` | pinned toolchain channel |
 | `build.rustc` / `build.cargo` | `rustc --version` / `cargo --version` | exact compiler identity |
-| `build.soroban_sdk` | workspace `Cargo.lock` | SDK major/minor/patch |
+| `build.soroban_sdk` | release project's `Cargo.lock` | SDK major/minor/patch |
 | `build.host` | `rustc -vV` | builder host triple (context only) |
 | `build.started_on` | UTC clock | ISO-8601 build time (informational) |
 

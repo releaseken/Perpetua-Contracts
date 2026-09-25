@@ -6,10 +6,26 @@ well-formed, ensuring the CI infrastructure itself is healthy.
 
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _make_stub_cargo(tmp_path: Path) -> str:
+    """Create a fake cargo binary that writes the expected product wasm."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    cargo = bin_dir / "cargo"
+    cargo.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -e\n"
+        "mkdir -p \"$PWD/target/wasm32v1-none/release\"\n"
+        "touch \"$PWD/target/wasm32v1-none/release/fluxora_stream.wasm\"\n"
+    )
+    cargo.chmod(0o755)
+    return str(bin_dir)
 
 
 def _import_script(name: str):
@@ -322,6 +338,99 @@ fn not_a_test() {}
         finally:
             if snap_file.exists():
                 snap_file.unlink()
+
+    def test_release_script_rejects_non_wasm_artifact(self, tmp_path):
+        """Release output must contain exactly the product wasm, no extras."""
+        script = REPO_ROOT / "script" / "release.sh"
+        out_dir = REPO_ROOT / "contracts" / "stream" / "target" / "wasm32v1-none" / "release"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        product = out_dir / "fluxora_stream.wasm"
+        junk = out_dir / "unexpected.txt"
+        product.write_bytes(b"valid")
+        junk.write_text("this is not the release artifact")
+        cargo_bin = _make_stub_cargo(tmp_path)
+        env = os.environ.copy()
+        env["PATH"] = f"{cargo_bin}:{env['PATH']}"
+        try:
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            assert result.returncode != 0, "release.sh should reject extra non-wasm payloads"
+            combined = (result.stdout + result.stderr).lower()
+            assert "unexpected artifact" in combined or "release output" in combined
+        finally:
+            if product.exists():
+                product.unlink()
+            if junk.exists():
+                junk.unlink()
+
+    def test_release_script_rejects_unexpected_wasm(self, tmp_path):
+        """Release output must reject non-product wasm blobs."""
+        script = REPO_ROOT / "script" / "release.sh"
+        out_dir = REPO_ROOT / "contracts" / "stream" / "target" / "wasm32v1-none" / "release"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        product = out_dir / "fluxora_stream.wasm"
+        stray = out_dir / "fluxora_archival_probe.wasm"
+        product.write_bytes(b"valid")
+        stray.write_bytes(b"bad")
+        cargo_bin = _make_stub_cargo(tmp_path)
+        env = os.environ.copy()
+        env["PATH"] = f"{cargo_bin}:{env['PATH']}"
+        try:
+            result = subprocess.run(
+                ["bash", str(script)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                check=False,
+                env=env,
+            )
+            assert result.returncode != 0, "release.sh should reject an unexpected wasm"
+            combined = (result.stdout + result.stderr).lower()
+            assert "unexpected artifact" in combined or "release output" in combined
+            assert "fluxora_archival_probe.wasm" in combined
+        finally:
+            if product.exists():
+                product.unlink()
+            if stray.exists():
+                stray.unlink()
+
+    def test_check_stream_wasm_size_reports_sections_and_fails_when_budget_exceeded(self, tmp_path):
+        """The size budget script must print a section breakdown and fail above MAX_BYTES."""
+        wasm_path = tmp_path / "fluxora_stream.wasm"
+        wasm_path.write_bytes(
+            b"\x00asm\x01\x00\x00\x00"
+            b"\x01\x04\x01\x60\x00\x00"
+            b"\x03\x02\x01\x00\x01"
+            b"\x07\x07\x01\x03\x65\x6e\x74\x72\x79\x00\x00"
+            b"\x0a\x03\x01\x00\x01\x00\x0b"
+            + b"\x00" * 32
+        )
+        env = os.environ.copy()
+        env["ARTIFACT_OVERRIDE"] = str(wasm_path)
+        env["BUILD_COMMAND_OVERRIDE"] = "true"
+        env["BASELINE_BYTES_OVERRIDE"] = "1"
+        env["MAX_BYTES_OVERRIDE"] = "10"
+        result = subprocess.run(
+            ["bash", "script/check-stream-wasm-size.sh"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert result.returncode != 0, "budget check should fail when the wasm exceeds MAX_BYTES"
+        combined = result.stdout + result.stderr
+        assert "section breakdown" in combined.lower()
+        assert "custom" in combined.lower()
+        assert "code" in combined.lower()
+        assert "data" in combined.lower()
+        assert "exceeds budget" in combined.lower()
 
 
 class TestScriptBranches:

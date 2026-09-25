@@ -16,16 +16,16 @@ pub mod op {
 /// Bitmask constants for the immutable [`Stream`] behavior flags.
 ///
 /// All three bits are fixed at creation and never mutate. Packing them into a
-/// single byte keeps one bit for each of `cancellable`, `pausable` and
-/// `transferable`, shrinking the serialized `Stream` entry in persistent
-/// storage by two fields.
+/// single SDK-supported integer keeps one bit for each of `cancellable`,
+/// `pausable` and `transferable`, shrinking the serialized `Stream` entry in
+/// persistent storage by two fields.
 pub mod flag {
     /// Stream may be cancelled by its sender.
-    pub const CANCELLABLE: u8 = 1 << 0;
+    pub const CANCELLABLE: u32 = 1 << 0;
     /// Stream may be paused and resumed by its sender.
-    pub const PAUSABLE: u8 = 1 << 1;
+    pub const PAUSABLE: u32 = 1 << 1;
     /// Stream recipient may be transferred by the current recipient.
-    pub const TRANSFERABLE: u8 = 1 << 2;
+    pub const TRANSFERABLE: u32 = 1 << 2;
 }
 
 /// A delegation grant stored in persistent storage.
@@ -96,10 +96,10 @@ pub struct Stream {
     /// is no cliff. Gates withdrawal; does not delay accrual.
     pub cliff_time: u64,
     /// Fixed at creation, never mutable. Packed bitmask of [`flag`]:
-    /// `CANCELLABLE | PAUSABLE | TRANSFERABLE`. One storage byte for all three
-    /// behavior flags instead of three bool fields. See [`Stream::cancellable`]
+    /// `CANCELLABLE | PAUSABLE | TRANSFERABLE`. One SDK-supported integer for
+    /// all three behavior flags instead of three bool fields. See [`Stream::cancellable`]
     /// / [`Stream::pausable`] / [`Stream::transferable`].
-    pub flags: u8,
+    pub flags: u32,
     /// `Some(t)` while paused: the instant the accrual clock froze.
     pub paused_at: Option<u64>,
     /// Cumulative seconds spent paused, excluding any in-progress pause.
@@ -123,11 +123,9 @@ impl Stream {
         self.flags & flag::TRANSFERABLE != 0
     }
 
-    /// Build the packed flags byte from the three creation-time booleans.
-    pub fn flags_from_parts(cancellable: bool, pausable: bool, transferable: bool) -> u8 {
-        (u8::from(cancellable) & 1)
-            | ((u8::from(pausable) & 1) << 1)
-            | ((u8::from(transferable) & 1) << 2)
+    /// Build the packed flags integer from the three creation-time booleans.
+    pub fn flags_from_parts(cancellable: bool, pausable: bool, transferable: bool) -> u32 {
+        u32::from(cancellable) | (u32::from(pausable) << 1) | (u32::from(transferable) << 2)
     }
 
     /// Enforces the recipient-only withdrawal policy.
@@ -157,17 +155,18 @@ impl Stream {
 /// There is no `Config` key: with no admin, no fees and no upgradeability
 /// (all explicit non-goals), the contract has nothing to configure.
 #[contracttype]
+#[repr(u32)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
     /// Instance storage. Monotonic counter, next id to hand out.
     /// Incremented only on successful stream creation.
-    NextStreamId,
+    NextStreamId = 0,
     /// Instance storage. Number of streams successfully created.
     /// Incremented only in the same transaction as `NextStreamId` and the
     /// corresponding `Stream(id)` entry.
-    StreamCount,
+    StreamCount = 1,
     /// Persistent storage. One entry per stream.
-    Stream(u64),
+    Stream(u64) = 2,
     /// Persistent storage. One entry per (stream_id, delegate) pair.
-    Delegate(u64, Address),
+    Delegate(u64, Address) = 3,
 }

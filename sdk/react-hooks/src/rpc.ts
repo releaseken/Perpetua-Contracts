@@ -22,6 +22,72 @@ import {
 
 import { Stream, StreamStatus } from './types.js';
 
+export interface BatchStreamLookupOptions {
+  readonly contractId: string;
+  readonly streamIds: bigint[];
+}
+
+export interface BatchStreamLookupHealth {
+  readonly status?: string;
+}
+
+function streamIdFromKey(scVal: unknown): bigint | null {
+  const native = Array.isArray(scVal)
+    ? scVal
+    : (scVal && typeof scVal === 'object' && 'switch' in (scVal as object)
+        ? scValToNative(scVal as xdr.ScVal)
+        : null);
+
+  if (!Array.isArray(native) || native.length < 2 || native[0] !== 'Stream') {
+    return null;
+  }
+  return toBigInt(native[1]);
+}
+
+function buildStreamLedgerKey(contractId: string, streamId: bigint): xdr.LedgerKey {
+  const contractBytes = StrKey.decodeContract(contractId);
+  return xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: xdr.ScAddress.scAddressTypeContract(contractBytes),
+      key: nativeToScVal(['Stream', streamId]),
+      durability: xdr.ContractDataDurability.persistent(),
+    }),
+  );
+}
+
+export async function batchGetStreams(
+  server: Pick<SorobanRpc.Server, 'getHealth' | 'getLedgerEntries'>,
+  opts: BatchStreamLookupOptions,
+): Promise<Map<bigint, Stream>> {
+  const { contractId, streamIds } = opts;
+  if (!streamIds.length) {
+    return new Map();
+  }
+
+  const health = await server.getHealth();
+  if (health?.status && health.status !== 'healthy' && health.status !== 'start-up') {
+    throw new Error(`Soroban RPC is not healthy: ${health.status}`);
+  }
+
+  const uniqueIds = [...new Set(streamIds.map((id) => BigInt(id)))];
+  const keys = uniqueIds.map((streamId) => buildStreamLedgerKey(contractId, streamId));
+  const result = await server.getLedgerEntries(keys as any);
+  const values = new Map<bigint, Stream>();
+
+  for (const entry of result.entries ?? []) {
+    const data = entry?.val?.contractData?.();
+    if (!data) continue;
+
+    const streamId = streamIdFromKey(data.key());
+    if (streamId === null) continue;
+
+    const stream = asStream(data.val(), streamId);
+    values.set(streamId, stream);
+  }
+
+  return values;
+}
+
 /** Read-only operations the hooks need. Swap for a mock in tests. */
 export interface PerpetuaClient {
   readonly rpcUrl: string;
@@ -65,8 +131,30 @@ function toBigInt(value: bigint | number | boolean | string | null): bigint {
   return BigInt(String(value));
 }
 
-function asStream(val: xdr.ScVal, id: bigint): Stream {
-  const map = val.map();
+function asStream(val: unknown, id: bigint): Stream {
+  if (val && typeof val === 'object' && !('map' in (val as object)) && !('switch' in (val as object))) {
+    const fields = val as Record<string, unknown>;
+    const statusValue = Number(fields.status ?? 0);
+    return {
+      id,
+      sender: String(fields.sender ?? ''),
+      recipient: String(fields.recipient ?? ''),
+      token: String(fields.token ?? ''),
+      deposited: toBigInt(fields.deposited as bigint | number | boolean | string | null),
+      withdrawn: toBigInt(fields.withdrawn as bigint | number | boolean | string | null),
+      start_time: toBigInt(fields.start_time as bigint | number | boolean | string | null),
+      end_time: toBigInt(fields.end_time as bigint | number | boolean | string | null),
+      cliff_time: toBigInt(fields.cliff_time as bigint | number | boolean | string | null),
+      cancellable: Boolean(fields.cancellable),
+      pausable: Boolean(fields.pausable),
+      transferable: Boolean(fields.transferable),
+      paused_at: fields.paused_at == null ? null : toBigInt(fields.paused_at as bigint | number | boolean | string | null),
+      paused_total: toBigInt(fields.paused_total as bigint | number | boolean | string | null),
+      status: [0, 1, 2, 3].includes(statusValue) ? (statusValue as StreamStatus) : StreamStatus.Active,
+    };
+  }
+
+  const map = (val as xdr.ScVal).map();
   const field = (name: string): xdr.ScVal | undefined => {
     for (const entry of map.entries()) {
       if (scalar(entry.key()) === name) return entry.val();

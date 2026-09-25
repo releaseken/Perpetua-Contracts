@@ -57,15 +57,16 @@ pub struct Config {
 }
 
 #[contracttype]
+#[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DataKey {
-    Config,
+    Config = 0,
     /// token id (`stream_id`) -> current NFT owner.
-    Owner(u64),
+    Owner(u64) = 1,
     /// owner -> number of claim tokens held.
-    Balance(Address),
+    Balance(Address) = 2,
     /// Number of distinct tokens minted.
-    Supply,
+    Supply = 3,
 }
 
 #[contracttype]

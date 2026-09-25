@@ -1,7 +1,7 @@
 //! Stage 1 — `create_stream`: happy path, custody, and every validation gate.
 
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::Address;
+use soroban_sdk::{Address, IntoVal, Symbol, TryFromVal, TryIntoVal, Val};
 
 use super::common::*;
 use crate::{storage, DataKey, Error, StreamStatus};
@@ -134,6 +134,60 @@ fn create_records_every_field() {
     assert_eq!(s.paused_at, None);
     assert_eq!(s.paused_total, 0);
     assert_eq!(s.status, StreamStatus::Active);
+}
+
+#[test]
+fn create_emits_stream_created_event_with_full_initial_state() {
+    let h = Harness::new();
+    let start = h.now() + DAY;
+    let end = start + 100 * DAY;
+    let cliff = start + 10 * DAY;
+    let deposit = 500 * ONE;
+
+    let id = h.create(deposit, start, end, cliff, true, false, true);
+
+    let events = h
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&h.contract_id)
+        .events()
+        .to_vec();
+    assert_eq!(events.len(), 1, "create_stream must emit exactly one stream_created event");
+
+    let event = &events[0];
+    let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
+    let mut topics = soroban_sdk::vec![&h.env];
+    for topic in body.topics.iter() {
+        topics.push_back(soroban_sdk::Val::try_from_val(&h.env, topic).unwrap());
+    }
+
+    assert_eq!(topics.len(), 4, "StreamCreated: topic[0] + stream_id + sender + recipient = 4");
+    assert_eq!(topics.get(0).unwrap().try_into_val(&h.env).unwrap(), Symbol::new(&h.env, "stream_created"));
+    assert_eq!(topics.get(1).unwrap(), &id.into_val(&h.env));
+    assert_eq!(topics.get(2).unwrap(), &h.sender.clone().into_val(&h.env));
+    assert_eq!(topics.get(3).unwrap(), &h.recipient.clone().into_val(&h.env));
+
+    let payload: soroban_sdk::Map<Symbol, Val> = soroban_sdk::Val::try_from_val(&h.env, &body.data)
+        .unwrap()
+        .try_into_val(&h.env)
+        .unwrap();
+
+    let expected_fields = [
+        (Symbol::new(&h.env, "token"), h.token.clone().into_val(&h.env)),
+        (Symbol::new(&h.env, "deposited"), deposit.into_val(&h.env)),
+        (Symbol::new(&h.env, "start_time"), start.into_val(&h.env)),
+        (Symbol::new(&h.env, "end_time"), end.into_val(&h.env)),
+        (Symbol::new(&h.env, "cliff_time"), cliff.into_val(&h.env)),
+        (Symbol::new(&h.env, "cancellable"), true.into_val(&h.env)),
+        (Symbol::new(&h.env, "pausable"), false.into_val(&h.env)),
+        (Symbol::new(&h.env, "transferable"), true.into_val(&h.env)),
+    ];
+
+    for (key, value) in expected_fields {
+        assert!(payload.contains_key(key.clone()), "missing payload field: {:?}", key);
+        assert_eq!(payload.get(key).unwrap(), value, "wrong payload value for field: {:?}", key);
+    }
 }
 
 #[test]

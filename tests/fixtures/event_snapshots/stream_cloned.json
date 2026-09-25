@@ -1,0 +1,13 @@
+{
+  "ledger_sequence": 100,
+  "stream_id": 7,
+  "events": [
+    {
+      "topic": "stream_cloned",
+      "data": {
+        "recipient": "GRECIPlENT",
+        "deposit_amount": 10000000
+      }
+    }
+  ]
+}

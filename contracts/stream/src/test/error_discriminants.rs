@@ -205,6 +205,20 @@ fn discriminant_fixture_matches_source() {
     }
 }
 
+/// Keep the checked-in ABI reference synchronized with the frozen fixture.
+#[test]
+fn discriminant_fixture_matches_abi_documentation() {
+    let abi = include_str!("../../../../docs/ABI.md");
+
+    for (name, disc) in DISCRIMINANT_FIXTURE {
+        let row = format!("| {disc} | `{name}` |");
+        assert!(
+            abi.contains(&row),
+            "docs/ABI.md is missing the error mapping {name} = {disc}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public error-path tests — every variant reachable via try_* calls
 // ---------------------------------------------------------------------------

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""Check snapshot security-field diffs between PR and base branch.
-
-Parses snapshot JSON files changed in a PR and exits 1 if any
-security-relevant field (auth, events, error codes, storage) was altered.
-"""
+"""Check security-relevant changes in contract snapshot JSON files."""
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -15,97 +12,143 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Security-relevant fields in snapshot JSON files
 SECURITY_FIELDS = {
-    "auth", "events", "error_code", "error", "storage_keys",
-    "storage", "contract_errors", "topics",
+    "auth", "auths", "require_auth", "signatures", "events", "topic",
+    "topics", "data", "error", "error_code", "ContractError", "storage",
+    "state", "DataKey",
 }
 
 
-def get_changed_snapshots(base: str) -> list[Path]:
-    """Return snapshot files changed between base and HEAD."""
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base}...HEAD"],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-    )
-    if result.returncode != 0:
-        print(f"WARNING: git diff failed: {result.stderr}")
+def get_changed_files(base: str, head: str | None = None) -> list[str]:
+    """Return changed snapshot JSON paths between two git refs."""
+    args = ["git", "diff", "--name-only", base]
+    if head is not None:
+        args.append(head)
+
+    try:
+        output = subprocess.check_output(args)
+    except subprocess.CalledProcessError:
         return []
 
-    changed = []
-    for line in result.stdout.splitlines():
-        path = REPO_ROOT / line.strip()
-        if path.suffix == ".json" and "test_snapshots" in str(path):
-            changed.append(path)
-    return changed
+    return [
+        path for path in output.decode("utf-8").splitlines()
+        if path.endswith(".json") and "test_snapshots" in path
+    ]
+
+
+def get_changed_snapshots(base: str) -> list[Path]:
+    """Compatibility wrapper returning changed snapshot paths as ``Path`` objects."""
+    return [REPO_ROOT / path for path in get_changed_files(base)]
+
+
+def get_file_content(commit: str | None, path: str) -> str | None:
+    """Read a file from git, or from the working tree when no commit is given."""
+    if commit is not None:
+        try:
+            return subprocess.check_output(["git", "show", f"{commit}:{path}"]).decode(
+                "utf-8"
+            )
+        except subprocess.CalledProcessError:
+            return None
+
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as snapshot_file:
+        return snapshot_file.read()
+
+
+def get_diff_paths(old, new, prefix: str = "") -> list[str]:
+    """Return JSON paths whose values differ between two decoded documents."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        paths = []
+        for key in old.keys() | new.keys():
+            child = f"{prefix}.{key}" if prefix else key
+            if key not in old or key not in new:
+                paths.append(child)
+            else:
+                paths.extend(get_diff_paths(old[key], new[key], child))
+        return paths
+
+    if isinstance(old, list) and isinstance(new, list):
+        if len(old) != len(new):
+            return [prefix]
+        paths = []
+        for index, (old_item, new_item) in enumerate(zip(old, new)):
+            child = f"{prefix}[{index}]"
+            paths.extend(get_diff_paths(old_item, new_item, child))
+        return paths
+
+    return [] if old == new else [prefix]
+
+
+def is_security_relevant(path: str) -> bool:
+    """Return whether a changed JSON path contains a security-relevant member."""
+    members = path.replace("[", ".").replace("]", "").split(".")
+    return any(member in SECURITY_FIELDS for member in members)
 
 
 def check_snapshot_security_fields(snapshot_path: Path, base: str) -> list[str]:
-    """Check if security fields changed in a snapshot file."""
-    issues = []
-
+    """Compatibility helper for checking a working-tree snapshot against git."""
     try:
-        rel = snapshot_path.relative_to(REPO_ROOT)
+        relative_path = snapshot_path.relative_to(REPO_ROOT)
     except ValueError:
-        issues.append(f"{snapshot_path.name}: path is not under repository root")
-        return issues
+        return [f"{snapshot_path.name}: path is not under repository root"]
 
+    old_content = get_file_content(base, str(relative_path))
+    new_content = snapshot_path.read_text(encoding="utf-8")
     try:
-        # Get the base version
-        base_result = subprocess.run(
-            ["git", "show", f"{base}:{rel}"],
-            capture_output=True,
-            text=True,
-            cwd=REPO_ROOT,
-        )
+        old_data = json.loads(old_content) if old_content is not None else {}
+        new_data = json.loads(new_content)
+    except (json.JSONDecodeError, OSError) as error:
+        return [f"{snapshot_path.name}: error: {error}"]
 
-        if base_result.returncode != 0:
-            # New file, no base version
-            return issues
-
-        base_data = json.loads(base_result.stdout)
-        head_data = json.loads(snapshot_path.read_text())
-
-        for field in SECURITY_FIELDS:
-            if field in base_data and field in head_data:
-                if base_data[field] != head_data[field]:
-                    issues.append(f"{rel}: field '{field}' changed")
-            elif field in base_data and field not in head_data:
-                issues.append(f"{rel}: field '{field}' removed")
-            elif field not in base_data and field in head_data:
-                issues.append(f"{rel}: field '{field}' added")
-    except (json.JSONDecodeError, OSError) as e:
-        issues.append(f"{snapshot_path.name}: error: {e}")
-
-    return issues
+    return [
+        f"{relative_path}: field '{path}' changed"
+        for path in get_diff_paths(old_data, new_data)
+        if is_security_relevant(path)
+    ]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check snapshot security diffs")
-    parser.add_argument("--base", required=True, help="Base ref to compare against")
+    parser.add_argument("--base", default="HEAD", help="Base ref to compare against")
+    parser.add_argument("--head", default=None, help="Head ref to compare against")
     args = parser.parse_args()
 
-    snapshots = get_changed_snapshots(args.base)
-    if not snapshots:
-        print("No snapshot files changed.")
-        return 0
+    changed_files = get_changed_files(args.base, args.head)
+    if not changed_files:
+        print("No snapshot JSON files changed.")
+        raise SystemExit(0)
 
-    print(f"Checking {len(snapshots)} changed snapshot file(s)...")
     all_issues = []
+    for path in changed_files:
+        old_content = get_file_content(args.base, path)
+        new_content = get_file_content(args.head, path)
+        try:
+            old_data = json.loads(old_content) if old_content is not None else {}
+        except json.JSONDecodeError:
+            old_data = {}
+        try:
+            new_data = json.loads(new_content) if new_content is not None else {}
+        except json.JSONDecodeError:
+            new_data = {}
 
-    for snap in snapshots:
-        issues = check_snapshot_security_fields(snap, args.base)
-        all_issues.extend(issues)
+        security_paths = [
+            path for path in get_diff_paths(old_data, new_data)
+            if is_security_relevant(path)
+        ]
+        if not security_paths:
+            print(f"[INFO] Changes in {path}: none are security-relevant")
+        all_issues.extend(f"{path}: {diff_path}" for diff_path in security_paths)
 
     if all_issues:
-        print("FAIL: Security-relevant snapshot changes detected:")
+        print("Security-relevant fields changed:")
         for issue in all_issues:
             print(f"  - {issue}")
-        print("\nThese changes require mandatory extra review before merging.")
-        return 1
+        print("Mandatory extra review required.")
+        raise SystemExit(1)
 
-    print("OK: No security-relevant snapshot changes detected.")
-    return 0
+    print("No security-relevant snapshot changes detected.")
+    raise SystemExit(0)
 
 
 if __name__ == "__main__":

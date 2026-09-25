@@ -1,0 +1,14 @@
+{
+  "ledger_sequence": 100,
+  "events": [
+    {
+      "topic": "cancelled",
+      "data": {
+        "keeper": "GKEEPER",
+        "keeper_fee": 500000,
+        "recipient_amount": 8000000,
+        "refunded": 1000000
+      }
+    }
+  ]
+}

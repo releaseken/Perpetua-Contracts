@@ -47,7 +47,10 @@ cd "$(dirname "$0")/.."
 
 say() { printf '\n\033[1m── %s\033[0m\n' "$*"; }
 
-say "1. build the product artifact only"
+say "1. verify the pinned Rust toolchain"
+python3 script/verify_rust_version.py
+
+say "2. build the product artifact only"
 (
   cd "$STREAM_DIR"
   cargo build --target "$TARGET" --profile "$PROFILE"
@@ -56,23 +59,26 @@ say "1. build the product artifact only"
 OUT="$STREAM_DIR/target/$TARGET/$PROFILE"
 PRODUCT="$OUT/$PRODUCT_WASM"
 
-say "2. verify only the product artifact is present"
+say "3. verify only the product artifact is present"
 if [[ ! -f "$PRODUCT" ]]; then
   echo "   ✗ product artifact missing: $PRODUCT" >&2
   exit 1
 fi
-# With a standalone stream project nothing else lands in its output dir, but the
-# guard stays so a future "every contract its own wasm" regression is caught.
-for other in "$OUT"/*.wasm; do
-  [[ -e "$other" ]] || break
+# The release directory must be clean; anything other than the product wasm is a
+# reject condition. This catches both stray wasm files and unrelated artifacts.
+while IFS= read -r -d '' other; do
   name="$(basename "$other")"
   if [[ "$name" != "$PRODUCT_WASM" ]]; then
     echo "   ✗ unexpected artifact in release output: $name" >&2
     echo "     Releases must contain only the product contract." >&2
     exit 1
   fi
-done
+done < <(find "$OUT" -mindepth 1 -maxdepth 1 -print0)
 
-say "3. done"
+say "3. enforce the WASM size budget"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+"$SCRIPT_DIR/check-stream-wasm-size.sh"
+
+say "4. done"
 printf '   \033[32m✓\033[0m %s\n' "$PRODUCT"
 printf '   \033[32m✓\033[0m release artifacts contain only the product contract\n'

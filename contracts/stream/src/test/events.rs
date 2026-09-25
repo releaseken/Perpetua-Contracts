@@ -103,6 +103,62 @@ fn topic_name(h: &Harness, event: &(soroban_sdk::Vec<Val>, Val)) -> Symbol {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn recipient_transferred_event_emits_stream_and_recipient_fields() {
+    let h = Harness::new();
+    let stream_id = h.create_simple(100 * ONE, 100 * DAY);
+
+    h.client.transfer_recipient(&stream_id, &h.other);
+
+    let event = drain_events(&h)
+        .into_iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "recipient_transferred"))
+        .expect("transfer_recipient must emit a recipient_transferred event");
+
+    let topics = &event.0;
+    assert_eq!(topics.len(), 4, "RecipientTransferred: topic[0] + stream_id + old_recipient + new_recipient = 4");
+
+    let expected_stream_id: Val = stream_id.into_val(&h.env);
+    let expected_old_recipient: Val = h.recipient.clone().into_val(&h.env);
+    let expected_new_recipient: Val = h.other.clone().into_val(&h.env);
+
+    assert_eq!(topics.get(1).unwrap(), &expected_stream_id);
+    assert_eq!(topics.get(2).unwrap(), &expected_old_recipient);
+    assert_eq!(topics.get(3).unwrap(), &expected_new_recipient);
+
+    let payload: soroban_sdk::Map<Symbol, Val> = event.1.try_into_val(&h.env).unwrap();
+    assert!(payload.is_empty(), "RecipientTransferred payload should be empty data, with all identifying fields in topics");
+}
+
+#[test]
+fn withdrawn_event_topics_include_stream_id_and_recipient() {
+    let h = Harness::new();
+    let stream_id = h.create_simple(100 * ONE, 100 * DAY);
+
+    h.advance(30 * DAY);
+    h.client.withdraw(&stream_id, &Some(10 * ONE));
+
+    let event = drain_events(&h)
+        .into_iter()
+        .find(|event| topic_name(&h, event) == Symbol::new(&h.env, "withdrawn"))
+        .expect("withdraw must emit a withdrawn event");
+
+    let topics = &event.0;
+    assert_eq!(topics.len(), 3, "Withdrawn: topic[0] + stream_id + recipient = 3");
+
+    let expected_stream_id: Val = stream_id.into_val(&h.env);
+    let expected_recipient: Val = h.recipient.clone().into_val(&h.env);
+
+    assert_eq!(topics.get(1).unwrap(), &expected_stream_id);
+    assert_eq!(topics.get(2).unwrap(), &expected_recipient);
+
+    let payload: soroban_sdk::Map<Symbol, Val> = event.1.try_into_val(&h.env).unwrap();
+    assert!(payload.contains_key(Symbol::new(&h.env, "amount")));
+    assert!(payload.contains_key(Symbol::new(&h.env, "withdrawn")));
+    assert!(payload.contains_key(Symbol::new(&h.env, "deposited")));
+    assert!(payload.contains_key(Symbol::new(&h.env, "status")));
+}
+
+#[test]
 fn test_all_event_topic_names_are_unique() {
     let h = Harness::new();
 

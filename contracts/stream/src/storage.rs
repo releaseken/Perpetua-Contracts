@@ -85,12 +85,27 @@ pub const SECONDS_PER_LEDGER: u64 = 5;
 /// otherwise archive.
 pub const TTL_BUFFER_SECONDS: u64 = 30 * 24 * 60 * 60;
 
+/// Safety margin applied to the 30-day minimum TTL to absorb ledger-close drift.
+///
+/// The network does not close every ledger at exactly 5s; actual close time can
+/// drift above or below that nominal value. Using a small headroom means a
+/// nominal 30-day floor still remains well above 30 days in wall-clock terms if
+/// the network slows to around 5.2s/ledger, while also giving the keeper a bit
+/// of slack when the network is slightly faster than expected.
+pub const LEDGER_DRIFT_SAFETY_MULTIPLIER_NUMERATOR: u64 = 11;
+pub const LEDGER_DRIFT_SAFETY_MULTIPLIER_DENOMINATOR: u64 = 10;
+
 /// Floor for any stream entry's TTL, in ledgers, regardless of how little
-/// lifetime the stream has left. Roughly 30 days at the nominal close time.
+/// lifetime the stream has left. Roughly 30 days at the nominal close time,
+/// with a 10% headroom to absorb drift.
 ///
 /// A settled stream still has to stay readable: the recipient may not have
 /// withdrawn their tail yet, and the indexer needs to see the final state.
-pub const MIN_STREAM_TTL_LEDGERS: u32 = (TTL_BUFFER_SECONDS / SECONDS_PER_LEDGER) as u32;
+pub const MIN_STREAM_TTL_LEDGERS: u32 = ((TTL_BUFFER_SECONDS
+    * LEDGER_DRIFT_SAFETY_MULTIPLIER_NUMERATOR
+    + (LEDGER_DRIFT_SAFETY_MULTIPLIER_DENOMINATOR - 1))
+    / LEDGER_DRIFT_SAFETY_MULTIPLIER_DENOMINATOR
+    / SECONDS_PER_LEDGER) as u32;
 
 /// Convert a wall-clock duration into a ledger count, rounding up.
 ///
@@ -115,6 +130,17 @@ pub fn seconds_to_ledgers(seconds: u64) -> u32 {
     } else {
         ledgers as u32
     }
+}
+
+/// The network's current maximum entry TTL, in ledgers, queried dynamically
+/// from the Soroban host environment.
+///
+/// `max_entry_ttl` is a network parameter that can change on protocol upgrade,
+/// so it must never be baked in as a compile-time constant. Every TTL target
+/// is clamped against this value at call time, which keeps the rent math
+/// correct even if the network raises or lowers the ceiling.
+pub fn max_entry_ttl(env: &Env) -> u32 {
+    env.storage().max_ttl()
 }
 
 /// How many ledgers this stream's entry should be kept alive for, given the
@@ -155,182 +181,41 @@ pub fn ttl_target_ledgers_at(env: &Env, stream: &Stream, now: u64) -> u32 {
     let target = seconds_to_ledgers(remaining.saturating_add(TTL_BUFFER_SECONDS));
     let floored = target.max(MIN_STREAM_TTL_LEDGERS);
 
-    floored.min(env.storage().max_ttl())
+    // Query the network maximum at call time rather than assuming a static
+    // constant, so a protocol upgrade that changes `max_entry_ttl` is honored.
+    floored.min(max_entry_ttl(env))
 }
 
-/// Bump the instance entry. Tiny, and it carries the id counter, so it is
-/// always extended to the network maximum.
-pub fn extend_instance(env: &Env) {
-    let max = env.storage().max_ttl();
-    env.storage().instance().extend_ttl(max, max);
-}
-
-/// Bump one stream entry to its computed target.
-///
-/// The threshold equals the target, so every touch tops the entry back up to a
-/// full window rather than waiting for it to decay past some watermark. Rent is
-/// cheap relative to a stream archiving under a recipient.
-pub fn extend_stream(env: &Env, stream_id: u64, stream: &Stream) {
-    let target = ttl_target_ledgers(env, stream);
-    env.storage()
-        .persistent()
-        .extend_ttl(&DataKey::Stream(stream_id), target, target);
-}
-
-/// Read a stream, bumping its TTL on the way out.
-///
-/// Every read path in the contract goes through here, which is what implements
-/// "extend on every touch".
-pub fn load_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    let stream: Stream = env
-        .storage()
-        .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)?;
-    extend_stream(env, stream_id, &stream);
-    Ok(stream)
-}
-
-/// Read a stream without touching its TTL.
-///
-/// Used by the read-only view functions, which run in simulation and should not
-/// pretend to write. Also used by `extend_stream_ttl`, which does its own bump.
-pub fn peek_stream(env: &Env, stream_id: u64) -> Result<Stream, Error> {
-    env.storage()
-        .persistent()
-        .get(&DataKey::Stream(stream_id))
-        .ok_or(Error::StreamNotFound)
-}
-
-/// Write a stream back and bump its TTL.
-///
-/// If the stream did not exist before this call, the global stream counter (and the
-/// next stream id) is advanced. This makes the counter update atomic with the stream
-/// creation: if the caller fails before `save_stream`, the counter never increments.
-pub fn save_stream(env: &Env, stream_id: u64, stream: &Stream) {
-    let is_new = !env.storage().persistent().has(&DataKey::Stream(stream_id));
-    env.storage()
-        .persistent()
-        .set(&DataKey::Stream(stream_id), stream);
-    if is_new {
-        let current: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::NextStreamId)
-            .unwrap_or(0);
-        let next = current.checked_add(1).expect("stream id counter overflow");
-        env.storage().instance().set(&DataKey::NextStreamId, &next);
-        extend_instance(env);
-    }
-    extend_stream(env, stream_id, stream);
-}
-
-/// Return the next stream id without advancing the counter.
-///
-/// The counter is advanced by `save_stream` when a new stream is persisted first time.
-/// Ids are monotonic and never reused, so an id is a stable handle an indexer
-/// can key on forever.
-///
-/// # Design: global, not per-sender, not derived from storage
-///
-/// One counter (`DataKey::NextStreamId`) is shared by every caller. Ids are
-/// **not** namespaced per sender and **not** derived from any property of the
-/// stream itself (e.g. a hash of its fields) — a global sequence is the only
-/// scheme that gives every id, across every sender, a fixed total order with
-/// no coordination needed between callers.
-///
-/// # Why a rejected `create_stream` can never consume or reuse an id
-///
-/// `create_stream` calls this function only after every validation gate has
-/// passed, so a call rejected on validation (bad schedule, self-stream, dust
-/// rate, ...) never reaches here and the counter never moves.
-///
-/// The remaining case is the deposit transfer at the very end of
-/// `create_stream`, which can still fail (insufficient balance or allowance)
-/// *after* this function has already bumped the counter and after the new
-/// `Stream` entry has already been written. That is safe because a Soroban
-/// contract invocation is atomic end to end: if `create_stream` does not
-/// return `Ok`, every storage write it made — the counter bump and the
-/// `Stream` entry alike — is rolled back along with the failed token
-/// transfer, not just the transfer itself. So no id is ever left half
-/// allocated, and a retried call after a failure gets the exact id the
-/// failed attempt would have received, not the next one. `test::stream_ids`
-/// exercises this directly by forcing a deposit transfer to fail and
-/// asserting the next successful create reuses that id.
-///
-/// # Gaps
-///
-/// There are none. Every id in `0..stream_count()` was assigned to exactly
-/// one successful create and, once assigned, is never reassigned — even a
-/// stream whose entry later archives under [`stream_exists`] keeps its id
-/// permanently retired rather than freeing it for reuse.
-pub fn next_stream_id(env: &Env) -> Result<u64, Error> {
-    // Missing counter means no stream has been created yet — equivalent to 0.
-    // This is a default, not a precondition failure: create_stream is what
-    // initialises the counter, and there is no separate `init` entry point.
-    let current: u64 = env
-        .storage()
-        .instance()
-        .get(&DataKey::NextStreamId)
-        .unwrap_or(0);
-    // The counter is advanced by `save_stream` only after a new stream is
-    // persisted, but the exhaustion boundary is checked here so that a create
-    // at `u64::MAX` fails with the typed error instead of a panic in the
-    // counter increment. Ids are never reused and never wrap.
-    if current == u64::MAX {
-        return Err(Error::StreamIdExhausted);
-    }
-    extend_instance(env);
-    Ok(current)
-}
-
-/// Whether a stream entry is present and live (i.e. not archived).
-///
-/// `has` returns false for an archived entry, which is what lets the SDK
-/// distinguish "never existed" from "needs restoring" when combined with the
-/// id counter.
-pub fn stream_exists(env: &Env, stream_id: u64) -> bool {
-    env.storage().persistent().has(&DataKey::Stream(stream_id))
-}
-
-/// Total number of streams ever created.
-///
-/// This is equivalent to the next stream id because ids are never reused.
-pub fn stream_count(env: &Env) -> u64 {
-    // Same default as `next_stream_id`: an untouched instance has created
-    // zero streams. Not a recoverable precondition — callers treat 0 as the
-    // honest answer.
+/// Read the next stream id, defaulting to `0` on a fresh contract.
+pub fn next_stream_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&DataKey::NextStreamId)
         .unwrap_or(0)
 }
 
-// ---------------------------------------------------------------------------
-// Delegation
-// ---------------------------------------------------------------------------
-
-/// Persist a delegate grant, borrowing the stream's TTL.
-pub fn save_delegate(env: &Env, stream_id: u64, delegate: &Address, grant: &DelegateGrant) {
-    let key = DataKey::Delegate(stream_id, delegate.clone());
-    env.storage().persistent().set(&key, grant);
-    // Give the grant at least as long to live as the stream itself.
-    let stream = peek_stream(env, stream_id).expect("stream must exist when saving delegate");
-    let target = ttl_target_ledgers(env, &stream);
-    env.storage().persistent().extend_ttl(&key, target, target);
+/// Allocate the next stream id, guarding against `u64` overflow.
+///
+/// The counter is read from instance storage, incremented with `checked_add`,
+/// and written back. If the counter is already at `u64::MAX` the increment
+/// would silently wrap to `0` and collide with live streams, so the overflow
+/// is surfaced as [`Error::StreamIdOverflow`] instead.
+///
+/// The instance entry is re-extended to the network maximum on every
+/// allocation so the id counter can never archive before the streams it
+/// issued (see the module docs on the ordering guarantee).
+pub fn allocate_stream_id(env: &Env) -> Result<u64, Error> {
+    let current = next_stream_id(env);
+    let next = current.checked_add(1).ok_or(Error::StreamIdOverflow)?;
+    env.storage().instance().set(&DataKey::NextStreamId, &next);
+    extend_instance(env);
+    Ok(next)
 }
 
-/// Remove a delegate grant.
-pub fn remove_delegate(env: &Env, stream_id: u64, delegate: &Address) {
-    let key = DataKey::Delegate(stream_id, delegate.clone());
-    if env.storage().persistent().has(&key) {
-        env.storage().persistent().remove(&key);
-    }
-}
-
-/// Retrieve a delegate grant, or `None` if it does not exist.
-pub fn load_delegate(env: &Env, stream_id: u64, delegate: &Address) -> Option<DelegateGrant> {
+/// Bump the instance entry. Tiny, and it carries the id counter, so it is
+/// always extended to the network maximum.
+pub fn extend_instance(env: &Env) {
     env.storage()
-        .persistent()
-        .get(&DataKey::Delegate(stream_id, delegate.clone()))
+        .instance()
+        .extend_ttl(env.storage().max_ttl(), env.storage().max_ttl());
 }

@@ -28,14 +28,16 @@
 //!
 //! # What each measurement covers
 //!
-//! Every invocation here reports and then bounds three resource dimensions:
+//! Every invocation here reports and then bounds four resource dimensions:
 //!
 //! * **CPU** — `instructions`, the modelled CPU instruction count.
+//! * **Disk reads** — `disk_read_entries`, entries restored from disk. Live
+//!   contract state must keep this at zero under Protocol 27.
 //! * **Memory** — `memory_read_entries`, the in-memory ledger entries accessed
 //!   (live Soroban state is held in memory, not re-read from disk).
 //! * **Storage writes** — `write_entries`, the entries written to the ledger.
 //!
-//! The deterministic max/max+1 boundary tests below assert *all three* at the
+//! The deterministic max/max+1 boundary tests below assert *all four* at the
 //! cap, and that one past the cap is rejected with [`Error::BatchTooLarge`]
 //! before any partial mutation.
 //!
@@ -56,6 +58,8 @@ use crate::{Error, MAX_BATCH_SIZE};
 
 /// Maximum total transaction footprint: disk reads + memory reads + writes.
 const LEDGER_ENTRY_LIMIT: u32 = 400;
+/// Maximum entries restored from disk by one transaction.
+const DISK_READ_ENTRY_LIMIT: u32 = 200;
 /// Maximum entries one transaction may write.
 const WRITE_ENTRY_LIMIT: u32 = 200;
 /// Maximum total size of emitted contract events, in bytes.
@@ -66,6 +70,7 @@ const INSTRUCTION_LIMIT: i64 = 400_000_000;
 #[derive(Debug, Clone, Copy)]
 struct Cost {
     footprint: u32,
+    disk_reads: u32,
     writes: u32,
     memory: u32,
     instructions: i64,
@@ -73,22 +78,26 @@ struct Cost {
 }
 
 /// Report and return the last invocation's cost. Every resource dimension the
-/// issue asks about — CPU ([`Cost::instructions`]), memory
-/// ([`Cost::memory`], the in-memory ledger entries accessed), and storage
-/// writes ([`Cost::writes`]) — is surfaced so regressions are visible.
+/// issue asks about — CPU ([`Cost::instructions`]), disk reads
+/// ([`Cost::disk_reads`]), memory ([`Cost::memory`], the in-memory ledger
+/// entries accessed), and storage writes ([`Cost::writes`]) — is surfaced so
+/// regressions are visible.
 fn report(h: &Harness, label: &str) -> Cost {
     let r = h.env.cost_estimate().resources();
     let cost = Cost {
         footprint: r.disk_read_entries + r.memory_read_entries + r.write_entries,
+        disk_reads: r.disk_read_entries,
         writes: r.write_entries,
         memory: r.memory_read_entries,
         instructions: r.instructions,
         event_bytes: r.contract_events_size_bytes,
     };
     std::println!(
-        "{label:<26} footprint={:<4}/{LEDGER_ENTRY_LIMIT}  writes={:<4}/{WRITE_ENTRY_LIMIT}  \
-         mem={:<4}  events={:<6}/{EVENT_BYTES_LIMIT}  instructions={}",
+        "{label:<26} footprint={:<4}/{LEDGER_ENTRY_LIMIT}  disk={:<4}/{DISK_READ_ENTRY_LIMIT}  \
+         writes={:<4}/{WRITE_ENTRY_LIMIT}  mem={:<4}  events={:<6}/{EVENT_BYTES_LIMIT}  \
+         instructions={}",
         cost.footprint,
+        cost.disk_reads,
         cost.writes,
         cost.memory,
         cost.event_bytes,
@@ -97,12 +106,21 @@ fn report(h: &Harness, label: &str) -> Cost {
     cost
 }
 
+fn assert_no_disk_reads(label: &str, cost: Cost) {
+    assert_eq!(
+        cost.disk_reads, 0,
+        "{label}: live contract state unexpectedly incurred {} disk reads",
+        cost.disk_reads,
+    );
+}
+
 fn assert_has_headroom(label: &str, cost: Cost, factor: u32) {
     assert!(
         cost.footprint * factor <= LEDGER_ENTRY_LIMIT,
         "{label}: footprint {} lacks {factor}x headroom under {LEDGER_ENTRY_LIMIT}",
         cost.footprint,
     );
+    assert_no_disk_reads(label, cost);
     assert!(
         cost.writes * factor <= WRITE_ENTRY_LIMIT,
         "{label}: {} writes lack {factor}x headroom under {WRITE_ENTRY_LIMIT}",
@@ -220,6 +238,7 @@ fn batch_cost_grows_linearly_and_not_faster() {
         h.advance(DAY);
         h.client.batch_withdraw(&h.recipient, &h.ids(&ids[..size]));
         let cost = report(&h, &std::format!("batch_withdraw({size})"));
+        assert_no_disk_reads("batch_withdraw", cost);
         measurements.push((size as u32, cost));
     }
 
@@ -245,6 +264,7 @@ fn batch_ttl_cost_grows_linearly_and_not_faster() {
     for size in [1usize, 4, 8, MAX_BATCH_SIZE as usize] {
         h.client.batch_extend_ttl(&h.ids(&ids[..size]));
         let cost = report(&h, &std::format!("batch_extend_ttl({size})"));
+        assert_no_disk_reads("batch_extend_ttl", cost);
         measurements.push((size as u32, cost));
     }
 
@@ -285,6 +305,12 @@ fn cost_is_independent_of_how_many_streams_exist() {
         early_create.footprint, late_create.footprint,
         "creation footprint grew with the number of existing streams",
     );
+    assert_no_disk_reads("create", early_create);
+    assert_no_disk_reads("create", late_create);
+    assert_eq!(
+        early_create.disk_reads, late_create.disk_reads,
+        "creation disk reads grew with the number of existing streams",
+    );
     assert_eq!(early_create.writes, late_create.writes);
     assert_eq!(early_create.event_bytes, late_create.event_bytes);
 
@@ -304,6 +330,12 @@ fn cost_is_independent_of_how_many_streams_exist() {
         early.footprint, late.footprint,
         "withdrawal footprint grew with the number of existing streams",
     );
+    assert_no_disk_reads("withdraw", early);
+    assert_no_disk_reads("withdraw", late);
+    assert_eq!(
+        early.disk_reads, late.disk_reads,
+        "withdrawal disk reads grew with the number of existing streams",
+    );
     assert_eq!(early.writes, late.writes);
 }
 
@@ -320,6 +352,7 @@ fn the_event_budget_is_not_the_binding_constraint_at_the_cap() {
 
     h.client.batch_withdraw(&h.recipient, &h.ids(&ids));
     let cost = report(&h, "batch events");
+    assert_no_disk_reads("batch events", cost);
 
     let per_event = cost.event_bytes / MAX_BATCH_SIZE;
     let max_events_by_budget = EVENT_BYTES_LIMIT / per_event.max(1);
@@ -430,6 +463,8 @@ fn batch_withdraw_cost_at_max_is_comparable_to_half_batch() {
     h.client
         .batch_withdraw(&h.recipient, &h.ids(&all_ids[half..]));
     let full_cost = report(&h, "batch_withdraw(full)");
+    assert_no_disk_reads("batch_withdraw(half)", half_cost);
+    assert_no_disk_reads("batch_withdraw(full)", full_cost);
 
     // Full batch costs more, but not more than 2× — linear scaling.
     assert!(

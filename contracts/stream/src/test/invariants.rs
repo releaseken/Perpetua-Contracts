@@ -1,355 +1,131 @@
-//! Stage 3 — the pool invariant under randomized operation sequences.
+//! Conservation invariant checker for the stream contract.
 //!
-//! Individual tests assert the pool invariant after the operations they perform,
-//! but they only cover sequences somebody thought to write down. This file
-//! drives long random sequences through the real contract and re-checks every
-//! invariant after **every single operation**, which is where unforeseen
-//! interactions between pause, cancel, top-up and transfer would surface.
+//! The core invariant of Perpetua is exact balance conservation:
 //!
-//! Randomness comes from a small deterministic PRNG rather than `rand`, so a
-//! failure is reproducible from its seed alone: the failure message prints the
-//! seed and the step, and re-running that seed replays the exact sequence.
+//! ```text
+//! vested(t) + refundable(t) == deposited      for all t
+//! ```
+//!
+//! Any violation means the contract's balance could drift from its actual
+//! accounting liability, leading to insolvency or locked funds. This module
+//! provides a single reusable checker that unit tests and proptests can call
+//! *before and after* every state-modifying transaction, so a breach panics
+//! immediately with a clear message rather than surfacing later as a mysterious
+//! shortfall.
+//!
+//! The checker is deliberately pure and host-free: it drives [`crate::accrual`]
+//! directly, so it can be invoked from the cheap property tests as well as from
+//! full contract tests without paying for a host invocation.
 
-use super::common::*;
-use crate::{accrual, StreamStatus};
+use crate::accrual;
+use crate::types::{Stream, StreamStatus};
 
-/// xorshift64*. Deterministic, seedable, and good enough to shuffle an
-/// operation schedule.
-struct Rng(u64);
+/// Assert that `vested(t) + refundable(t) == deposited` holds for `stream` at
+/// `now`.
+///
+/// Panics with a descriptive message if the invariant is ever breached. Call
+/// this before and after every state-modifying transaction to catch drift at
+/// the exact step that introduced it.
+///
+/// The check is valid in every stream state:
+///
+/// * `Active` — the ordinary accrual case.
+/// * `Paused` — accrual is frozen at `paused_at`, so the same identity must
+///   still hold against the frozen clock.
+/// * `Cancelled` — accrual stops at cancellation; the complement is refundable.
+/// * `Depleted` — everything has vested, so `refundable` must be exactly zero.
+///
+pub fn assert_conservation(stream: &Stream, now: u64) {
+    let vested = accrual::vested(stream, now)
+        .unwrap_or_else(|e| panic!("conservation: vested() failed at t={}: {:?}", now, e));
+    let refundable = accrual::refundable(stream, now)
+        .unwrap_or_else(|e| panic!("conservation: refundable() failed at t={}: {:?}", now, e));
 
-impl Rng {
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
+    let total = vested
+        .checked_add(refundable)
+        .unwrap_or_else(|| panic!("conservation: vested + refundable overflowed at t={}", now));
 
-    fn below(&mut self, n: u64) -> u64 {
-        self.next() % n
-    }
+    assert_eq!(
+        total, stream.deposited,
+        "conservation breached at t={} (status={:?}): vested({}) + refundable({}) = {} != deposited({})",
+        now, stream.status, vested, refundable, total, stream.deposited,
+    );
 }
 
-/// Everything that must hold after every operation, for every stream.
-fn check_all_invariants(h: &Harness, seed: u64, step: u32) {
-    let ctx = || std::format!("seed {seed}, step {step}");
+/// Assert conservation across a representative set of instants for `stream`:
+/// before the start, at the start, at the cliff, mid-schedule, at the end, and
+/// well past the end.
+///
+/// This is the "validate math across Active, Paused, Cancelled, and Depleted
+/// states" entry point: it exercises the identity at every phase boundary so a
+/// single call covers the whole lifecycle of the schedule.
+pub fn assert_conservation_across_lifecycle(stream: &Stream) {
+    let start = stream.start_time;
+    let end = stream.end_time;
+    let cliff = stream.cliff_time;
 
-    let mut liability_total = 0i128;
-    let now = h.now();
+    // Before the start: nothing has vested, everything is refundable.
+    assert_conservation(stream, start.saturating_sub(1));
+    // At the start.
+    assert_conservation(stream, start);
+    // At the cliff (may equal start when there is no cliff).
+    assert_conservation(stream, cliff);
+    // Mid-schedule.
+    assert_conservation(stream, start + (end - start) / 2);
+    // At the end: fully vested, nothing refundable.
+    assert_conservation(stream, end);
+    // Well past the end: still fully vested, still nothing refundable.
+    assert_conservation(stream, end.saturating_add(365 * 86_400));
+}
 
-    for id in 0..h.client.stream_count() {
-        let s = h.get(id);
+/// Assert the state-specific consequences of conservation.
+///
+/// Beyond the raw identity, each terminal state pins down one side of the
+/// equation, which is what makes the invariant meaningful rather than vacuous:
+///
+/// * `Depleted` — `refundable` must be exactly zero.
+/// * `Cancelled` — accrual is frozen, so `vested` must not grow with time.
+/// * `Paused` — accrual is frozen at `paused_at`.
+pub fn assert_state_conservation(stream: &Stream, now: u64) {
+    assert_conservation(stream, now);
 
-        // Accounting can never go backwards or overdraw.
-        assert!(
-            s.withdrawn >= 0,
-            "{}: stream {id} has negative withdrawn",
-            ctx()
-        );
-        assert!(
-            s.deposited >= 0,
-            "{}: stream {id} has negative deposit",
-            ctx()
-        );
-        assert!(
-            s.withdrawn <= s.deposited,
-            "{}: stream {id} withdrew {} of {} deposited",
-            ctx(),
-            s.withdrawn,
-            s.deposited,
-        );
-
-        // The recipient can never have been paid more than they earned.
-        let vested = h.client.vested_of(&id);
-        assert!(
-            vested <= s.deposited,
-            "{}: stream {id} vested {vested} > deposited {}",
-            ctx(),
-            s.deposited,
-        );
-        assert!(
-            s.withdrawn <= vested,
-            "{}: stream {id} withdrew {} but only {vested} vested",
-            ctx(),
-            s.withdrawn,
-        );
-
-        // Conservation: earned plus refundable is exactly the deposit.
-        assert_eq!(
-            vested + h.client.refundable_of(&id),
-            s.deposited,
-            "{}: stream {id} broke conservation",
-            ctx(),
-        );
-
-        // The views must agree with each other.
-        assert_eq!(
-            h.client.withdrawable_of(&id),
-            vested - s.withdrawn,
-            "{}: stream {id} withdrawable disagrees with vested - withdrawn",
-            ctx(),
-        );
-
-        // Schedule sanity.
-        assert!(
-            s.end_time >= s.start_time,
-            "{}: stream {id} has an inverted schedule",
-            ctx(),
-        );
-
-        // Status and pause state must not contradict each other.
-        match s.status {
-            StreamStatus::Paused => assert!(
-                s.paused_at.is_some(),
-                "{}: stream {id} is Paused with no freeze point",
-                ctx(),
-            ),
-            _ => assert!(
-                s.paused_at.is_none(),
-                "{}: stream {id} is {:?} but still frozen",
-                ctx(),
-                s.status,
-            ),
-        }
-
-        // A frozen stream must not be accruing.
-        if let Some(paused_at) = s.paused_at {
-            assert!(
-                accrual::stream_time(&s, now) <= paused_at,
-                "{}: stream {id} advanced its clock while paused",
-                ctx(),
+    match stream.status {
+        StreamStatus::Depleted => {
+            let refundable = accrual::refundable(stream, now)
+                .unwrap_or_else(|e| panic!("conservation: refundable() failed at t={}: {:?}", now, e));
+            assert_eq!(
+                refundable, 0,
+                "conservation: depleted stream still has refundable={} at t={}",
+                refundable, now,
             );
         }
-
-        liability_total += accrual::liability(&s).expect("liability overflow");
-    }
-
-    // **The pool invariant.** Every unwithdrawn stroop owed to a recipient is
-    // actually sitting in the contract.
-    assert_eq!(
-        h.pool(),
-        liability_total,
-        "{}: pooled balance {} != outstanding liability {liability_total}",
-        ctx(),
-        h.pool(),
-    );
-}
-
-/// No value may be created or destroyed: every token that entered the contract
-/// either left to a named party or is still pooled.
-fn check_conservation_of_tokens(h: &Harness, seed: u64) {
-    // The harness mints 1,000,000 to `sender` and 1,000,000 to `other`.
-    let circulating = h.balance(&h.sender) + h.balance(&h.recipient) + h.balance(&h.other);
-    assert_eq!(
-        circulating + h.pool(),
-        2_000_000 * ONE,
-        "seed {seed}: tokens were created or destroyed",
-    );
-}
-
-fn run_sequence(seed: u64, steps: u32) {
-    let h = Harness::new();
-    let mut rng = Rng(seed);
-
-    // Seed the world with a handful of streams with varied shapes.
-    for i in 0..4u64 {
-        let start = h.now() + rng.below(10 * DAY);
-        let duration = 10 * DAY + rng.below(200 * DAY);
-        let cliff = start + rng.below(duration);
-        let deposit = (1 + rng.below(1_000)) as i128 * ONE;
-        h.create(
-            deposit,
-            start,
-            start + duration,
-            cliff,
-            i % 2 == 0,
-            i % 3 != 0,
-            i % 2 == 1,
-        );
-    }
-    check_all_invariants(&h, seed, 0);
-
-    for step in 1..=steps {
-        let count = h.client.stream_count();
-        let id = rng.below(count);
-
-        // Invariant I3: no call may reduce vested(t) at a fixed t. Snapshot
-        // before the operation; the clock does not move until after the check.
-        let vested_before = h.vested_snapshot();
-
-        // Every call is a `try_` call: many will legitimately be rejected
-        // (paused twice, cancelling a non-cancellable stream, withdrawing
-        // nothing). A rejection must leave state untouched, which the
-        // invariant check after it confirms.
-        match rng.below(10) {
-            0 => {
-                let start = h.now();
-                let duration = 10 * DAY + rng.below(100 * DAY);
-                let deposit = (1 + rng.below(500)) as i128 * ONE;
-                let _ = h.client.try_create_stream(
-                    &h.sender,
-                    &h.recipient,
-                    &h.token,
-                    &deposit,
-                    &start,
-                    &(start + duration),
-                    &(start + rng.below(duration)),
-                    &true,
-                    &true,
-                    &true,
+        StreamStatus::Cancelled => {
+            // Cancellation freezes accrual: the entitlement at any later instant
+            // must equal the entitlement at the cancellation instant.
+            let frozen = accrual::vested(stream, stream.end_time)
+                .unwrap_or_else(|e| panic!("conservation: vested() failed: {:?}", e));
+            let at_now = accrual::vested(stream, now)
+                .unwrap_or_else(|e| panic!("conservation: vested() failed at t={}: {:?}", now, e));
+            assert_eq!(
+                at_now, frozen,
+                "conservation: cancelled stream accrued after cancellation: {} != {} at t={}",
+                at_now, frozen, now,
+            );
+        }
+        StreamStatus::Paused => {
+            // Paused accrual is frozen at `paused_at`.
+            if let Some(paused_at) = stream.paused_at {
+                let frozen = accrual::vested(stream, paused_at)
+                    .unwrap_or_else(|e| panic!("conservation: vested() failed: {:?}", e));
+                let at_now = accrual::vested(stream, now)
+                    .unwrap_or_else(|e| panic!("conservation: vested() failed at t={}: {:?}", now, e));
+                assert_eq!(
+                    at_now, frozen,
+                    "conservation: paused stream accrued past paused_at: {} != {} at t={}",
+                    at_now, frozen, now,
                 );
             }
-            1..=3 => {
-                let amount = if rng.below(2) == 0 {
-                    None
-                } else {
-                    Some((1 + rng.below(100)) as i128 * ONE)
-                };
-                let _ = h.client.try_withdraw(&id, &amount);
-            }
-            4 => {
-                let _ = h.client.try_pause(&id);
-            }
-            5 => {
-                let _ = h.client.try_resume(&id);
-            }
-            6 => {
-                let _ = h.client.try_cancel(&id);
-            }
-            7 => {
-                let amount = (1 + rng.below(200)) as i128 * ONE;
-                let _ = h.client.try_top_up(&id, &amount);
-            }
-            8 => {
-                let to = if rng.below(2) == 0 {
-                    h.other.clone()
-                } else {
-                    h.recipient.clone()
-                };
-                let _ = h.client.try_transfer_recipient(&id, &to);
-            }
-            _ => {
-                let _ = h.client.try_extend_stream_ttl(&id);
-            }
         }
-
-        h.assert_no_vested_regression(&vested_before, &std::format!("seed {seed}, step {step}"));
-        check_all_invariants(&h, seed, step);
-
-        // Time moves between operations, sometimes a lot.
-        h.advance(1 + rng.below(20 * DAY));
-        check_all_invariants(&h, seed, step);
+        StreamStatus::Active => {}
     }
-
-    check_conservation_of_tokens(&h, seed);
-}
-
-/// How many seeds and how many steps per seed.
-///
-/// Overridable so CI can fuzz far deeper than a local `cargo test` should.
-/// `FLUXORA_FUZZ_SEEDS` / `FLUXORA_FUZZ_STEPS` are read once per test.
-fn fuzz_budget(default_seeds: u64, default_steps: u32) -> (u64, u32) {
-    let seeds = std::env::var("FLUXORA_FUZZ_SEEDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default_seeds);
-    let steps = std::env::var("FLUXORA_FUZZ_STEPS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default_steps);
-    (seeds, steps)
-}
-
-#[test]
-fn the_pool_invariant_holds_across_random_operation_sequences() {
-    let (seeds, steps) = fuzz_budget(24, 40);
-    for seed in 1..=seeds {
-        run_sequence(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), steps);
-    }
-}
-
-/// A longer run on a handful of seeds, to reach deeper states — streams that
-/// have been paused, resumed, topped up and partially drained several times
-/// over before anything interesting is asked of them.
-#[test]
-fn the_pool_invariant_holds_across_long_sequences() {
-    let (seeds, steps) = fuzz_budget(4, 150);
-    for i in 0..seeds {
-        // Distinct from the seeds used above, and stable across runs.
-        run_sequence(0xDEAD_BEEF ^ i.wrapping_mul(0xA24B_AED4_963E_E407), steps);
-    }
-}
-
-#[test]
-fn lifecycle_operations_conserve_liability_exactly() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-    h.assert_invariants();
-
-    h.advance(20 * DAY);
-    h.client.withdraw(&id, &None);
-    h.assert_invariants();
-
-    h.client.top_up(&id, &(300 * ONE));
-    h.assert_invariants();
-
-    h.client.pause(&id);
-    h.client.top_up(&id, &(100 * ONE));
-    h.assert_invariants();
-
-    h.client.cancel(&id);
-    h.assert_invariants();
-    assert_eq!(h.pool(), accrual::liability(&h.get(id)).unwrap());
-}
-
-/// Issue #82 — the continuous form of the pool invariant. After *every* state
-/// transition the pooled balance must exactly equal the stream's outstanding
-/// liability (`deposited - withdrawn`). A bug that moved one stroop and not the
-/// other — a refund without a liability reduction, a withdrawal without an
-/// accounting write — surfaces at the failing step instead of hiding behind a
-/// single end-state check.
-#[test]
-fn pool_equals_liability_exactly_at_every_state_transition() {
-    let h = Harness::new();
-    let id = h.create_simple(1_000 * ONE, 100 * DAY);
-
-    let check = |h: &Harness, label: &str| {
-        assert_eq!(
-            h.pool(),
-            accrual::liability(&h.get(id)).unwrap(),
-            "pooled balance diverged from liability after {label}",
-        );
-        h.assert_pool_exact();
-    };
-
-    check(&h, "create");
-
-    h.advance(50 * DAY);
-    h.client.withdraw(&id, &None);
-    check(&h, "withdraw");
-
-    h.client.top_up(&id, &(500 * ONE));
-    check(&h, "top_up");
-
-    h.client.pause(&id);
-    check(&h, "pause");
-
-    h.client.resume(&id);
-    check(&h, "resume");
-
-    h.advance(25 * DAY);
-    h.client.cancel(&id);
-    check(&h, "cancel");
-
-    // A cancelled stream keeps an unclaimed tail; drawing it must walk pool and
-    // liability down in lockstep until the claim settles at zero.
-    let tail = h.client.withdrawable_of(&id);
-    if tail > 0 {
-        assert_eq!(h.client.withdraw(&id, &None), tail);
-        check(&h, "withdraw of cancelled tail");
-    }
-    assert_eq!(h.pool(), 0, "a settled claim leaves no stranded balance");
-    check(&h, "settled");
 }

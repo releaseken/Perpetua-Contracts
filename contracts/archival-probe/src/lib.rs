@@ -57,10 +57,11 @@
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Env, Symbol};
 
 #[contracttype]
+#[repr(u32)]
 #[derive(Clone)]
 pub enum Key {
     /// The single persistent entry whose archival we are waiting for.
-    Canary,
+    Canary = 0,
 }
 
 #[contracterror]

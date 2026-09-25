@@ -23,6 +23,7 @@ name = "fluxora-archival-probe"
 description = "Throwaway probe that proves the Soroban archival/restore flow. NOT part of the product; excluded from release artifacts."
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/hannyloveworld/Perpetua-Contracts"
 publish = false

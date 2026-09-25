@@ -27,11 +27,63 @@
 //! 5. **No auth required.** Read methods must not require any authorization — they
 //!    are callable by anyone.
 
-use soroban_sdk::testutils::storage::Persistent as _;
+use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 
 use super::common::*;
 use crate::{accrual, storage, DataKey, Error, StreamStatus};
+
+fn assert_view_is_read_only(h: &Harness, stream_id: u64, expected_status: StreamStatus) {
+    let count_before = h.client.stream_count();
+    let ttl_before = h.ttl_of(stream_id);
+    let instance_ttl_before = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    let stream_before = h.client.get_stream(&stream_id);
+    assert_eq!(stream_before.status, expected_status);
+
+    h.client.get_stream(&stream_id);
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+    h.client.withdrawable_of(&stream_id);
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+    h.client.vested_of(&stream_id);
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+    h.client.refundable_of(&stream_id);
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+    assert_eq!(h.client.stream_count(), count_before);
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+    assert!(h.client.stream_exists(&stream_id));
+    assert_eq!(h.env.cost_estimate().resources().write_entries, 0);
+
+    assert_eq!(h.ttl_of(stream_id), ttl_before);
+    let instance_ttl_after = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
+    assert_eq!(instance_ttl_after, instance_ttl_before);
+    assert_eq!(h.client.get_stream(&stream_id), stream_before);
+}
+
+/// Every public view must remain read-only for every lifecycle status.
+#[test]
+fn all_views_have_zero_writes_for_every_status() {
+    let h = Harness::new();
+
+    let active = h.create_simple(1_000 * ONE, 100 * DAY);
+    assert_view_is_read_only(&h, active, StreamStatus::Active);
+
+    let paused = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.client.pause(&paused);
+    assert_view_is_read_only(&h, paused, StreamStatus::Paused);
+
+    let cancelled = h.create_simple(1_000 * ONE, 100 * DAY);
+    h.client.cancel(&cancelled);
+    assert_view_is_read_only(&h, cancelled, StreamStatus::Cancelled);
+
+    let depleted = h.create_simple(1_000 * ONE, 10 * DAY);
+    h.warp_to(T0 + 15 * DAY);
+    h.client.withdraw(&depleted, &None);
+    assert_view_is_read_only(&h, depleted, StreamStatus::Depleted);
+}
 
 // --- Read methods do not extend TTL on active streams -----------------------
 

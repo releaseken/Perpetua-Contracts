@@ -118,6 +118,93 @@ because `latestLedger` is right there in every response. It costs one field
 check. Treating a single URL as a single node is an assumption you are making
 either way — this just makes it explicit and cheap to stop making.
 
+## Frontend SDK guidance: poll until the target ledger
+
+If your app submits a Soroban transaction and immediately reads contract state,
+add a barrier. In practice, this means polling `getLatestLedger()` until the
+node is at or beyond the target ledger for your write, then reading the stream
+state. Treat that read as the boundary between "write not yet visible" and
+"safe to display".
+
+The pattern is simple:
+
+1. Submit the transaction.
+2. Wait for the transaction to be included in a ledger.
+3. Poll `getLatestLedger()` until it reaches or passes the ledger sequence you
+   just observed.
+4. Read the contract state only after that boundary.
+5. If the ledger still lags, retry instead of deriving a number from stale data.
+
+### TypeScript example
+
+```ts
+import type { rpc as SorobanRpc } from '@stellar/stellar-sdk';
+
+async function waitForLedger(
+  rpc: SorobanRpc.Server,
+  targetLedger: number,
+  { maxAttempts = 40, pollMs = 1000 } = {},
+): Promise<number> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const latest = await rpc.getLatestLedger();
+    if (latest.sequence >= targetLedger) {
+      return latest.sequence;
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+
+  throw new Error(
+    `RPC did not reach ledger ${targetLedger} after ${maxAttempts} attempts`,
+  );
+}
+
+async function readStreamAfterWrite(
+  rpc: SorobanRpc.Server,
+  txHash: string,
+  contract: { read: (args?: any[]) => Promise<any> },
+) {
+  const tx = await rpc.getTransaction(txHash);
+  const includedLedger = tx?.resultMeta?.v3?.sorobanTransactionMeta?.sorobanMeta?.ledger
+    ?? tx?.resultMeta?.v3?.ledger;
+
+  if (typeof includedLedger !== 'number') {
+    throw new Error(`Transaction ${txHash} is not yet included in a ledger`);
+  }
+
+  await waitForLedger(rpc, includedLedger, { maxAttempts: 40, pollMs: 1000 });
+  return contract.read();
+}
+```
+
+The precise `tx.resultMeta` field names can vary slightly by SDK version, but the
+idea is stable: read the included ledger from the transaction result, then wait
+for the node to advance to that sequence before querying state.
+
+### React / frontend pattern
+
+```ts
+async function refreshStreamState() {
+  const tx = await submitStreamTransaction();
+  const latestLedger = await rpc.getLatestLedger();
+
+  // Poll until the node is at least as far as the write's ledger.
+  while ((await rpc.getLatestLedger()).sequence < tx.ledgerSequence) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  return rpc.getContractValue({
+    contractId: STREAM_CONTRACT_ID,
+    key: 'stream',
+    // or whichever view your app uses
+  });
+}
+```
+
+If your UI reads the stream immediately after a top-up, withdrawal or claim,
+this barrier is the difference between a stale read and a correct one. The rate
+of accrual is not the only thing that can drift between ledgers — the node you
+read from can also still be behind the one that included your transaction.
+
 ## What to do
 
 These are ordered by preference. The first one makes the problem structurally
@@ -163,6 +250,135 @@ and if they disagree, discard and retry rather than combining them. If you are
 only sanity-checking rather than displaying, a bounded tolerance is enough — our
 exercise script allows about 30 seconds of accrual on the conservation check,
 with a comment saying why.
+
+### TypeScript reference implementation
+
+The JavaScript SDK exposes the sequence as `latestLedger` on each RPC response.
+It is response metadata, not a portable request header: Soroban RPC does not
+provide a standard `ledger` parameter that pins `simulateTransaction` to an
+older ledger. Treat `latestLedger` as the ledger-sequence header for the read,
+and retry the complete group when the values differ.
+
+When the required values are available as ledger keys, prefer one
+`getLedgerEntries` request instead of several simulations. The response carries
+one `latestLedger` for the whole key batch:
+
+```ts
+const response = await server.getLedgerEntries(countKey, ...streamKeys);
+const snapshotLedger = response.latestLedger;
+const entries = response.entries;
+```
+
+This is the closest RPC equivalent to pinning a read. It requires constructing
+the exact Soroban `LedgerKey` values, so contract views remain the simpler
+choice when the needed keys are not already known to the indexer.
+
+```ts
+import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
+
+type LedgerRead<T> = { value: T; latestLedger: number };
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export async function readAtOneLedger<T>(
+  reads: readonly (() => Promise<LedgerRead<T>>)[],
+  attempts = 5,
+): Promise<{ values: T[]; ledger: number }> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const batch = await Promise.all(reads.map((read) => read()));
+    const ledger = batch[0]?.latestLedger;
+    if (ledger !== undefined && batch.every((item) => item.latestLedger === ledger)) {
+      return { values: batch.map((item) => item.value), ledger };
+    }
+    await pause(250);
+  }
+  throw new Error("RPC reads did not converge on one ledger");
+}
+
+export async function simulateStamped<T>(
+  server: SorobanRpc.Server,
+  transaction: Parameters<SorobanRpc.Server["simulateTransaction"]>[0],
+  decode: (value: xdr.ScVal) => T,
+): Promise<LedgerRead<T>> {
+  const response = await server.simulateTransaction(transaction);
+  if (!response.result) throw new Error(response.error ?? "Simulation failed");
+  return { value: decode(response.result), latestLedger: response.latestLedger };
+}
+```
+
+Build each transaction with the same `Contract` and source account, then pass
+the resulting simulations to `readAtOneLedger`. An indexer that needs the
+count and all stream records should retry the whole snapshot, not read the
+count once and assume later `get_stream` calls see the same state:
+
+```ts
+async function readStreamSnapshot(
+  readCount: () => Promise<LedgerRead<bigint>>,
+  readStream: (id: bigint) => Promise<LedgerRead<Stream>>,
+): Promise<{ count: bigint; streams: Stream[]; ledger: number }> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const count = await readCount();
+    const streams = await Promise.all(
+      Array.from({ length: Number(count.value) }, (_, index) => readStream(BigInt(index))),
+    );
+    if (streams.every((stream) => stream.latestLedger === count.latestLedger)) {
+      return {
+        count: count.value,
+        streams: streams.map((stream) => stream.value),
+        ledger: count.latestLedger,
+      };
+    }
+    await pause(250);
+  }
+  throw new Error("stream snapshot crossed a ledger boundary");
+}
+```
+
+The count is read before allocating the id range, and every returned stream is
+accepted only when its sequence matches that count. This prevents a concurrent
+`create_stream` from producing a snapshot whose range was selected from one
+ledger but read from another. If a stream disappears or an id is out of range,
+discard the snapshot and retry; do not turn `StreamNotFound` into an empty
+record.
+
+For a read-after-write barrier, first wait for the transaction itself to reach
+`SUCCESS`, retain its committed ledger, then wait until the RPC endpoint has
+reported that ledger repeatedly before starting the stamped read group:
+
+```ts
+export async function waitForCommit(
+  server: SorobanRpc.Server,
+  hash: string,
+): Promise<number> {
+  for (;;) {
+    const transaction = await server.getTransaction(hash);
+    if (transaction.status === "SUCCESS") return transaction.ledger;
+    if (transaction.status === "FAILED") throw new Error("transaction failed");
+    await pause(1_000); // PENDING or NOT_FOUND: RPC indexing is still catching up.
+  }
+}
+
+export async function waitForLedger(
+  server: SorobanRpc.Server,
+  target: number,
+  consecutive = 4,
+): Promise<void> {
+  let seen = 0;
+  while (seen < consecutive) {
+    const latest = (await server.getLatestLedger()).sequence;
+    seen = latest >= target ? seen + 1 : 0;
+    await pause(1_000);
+  }
+}
+
+const committedLedger = await waitForCommit(server, sendResult.hash);
+await waitForLedger(server, committedLedger);
+const snapshot = await readStreamSnapshot(readCount, readStream);
+```
+
+The barrier reduces stale-replica reads after a write; the stamped group is
+still required for consistency between multiple views. Do not use the latest
+ledger sampled before `sendTransaction` as the barrier target: only the ledger
+returned by successful transaction polling proves that the write was included.
 
 ### 4. Never assert exact equality across two calls in a test
 

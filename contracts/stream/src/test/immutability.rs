@@ -63,14 +63,12 @@ fn enclosing_function<'a>(lines: &'a [&str], idx: usize) -> Option<&'a str> {
 /// `stream.cancellable = ...` is the one shape that would let a setter exist.
 #[test]
 fn no_assignment_to_flags_anywhere() {
-    for flag in FLAGS {
-        for (n, line) in flag_lines(LIB_SRC, &format!(".{flag} =")) {
-            panic!(
-                "{flag} assigned to at lib.rs:{n}: `{}` — capability flags are \
-                 immutable after create_stream",
-                line.trim()
-            );
-        }
+    for (n, line) in flag_lines(LIB_SRC, ".flags =") {
+        panic!(
+            "flags assigned to at lib.rs:{n}: `{}` — capability flags are \
+             immutable after create_stream",
+            line.trim()
+        );
     }
 }
 
@@ -80,26 +78,24 @@ fn no_assignment_to_flags_anywhere() {
 #[test]
 fn flags_are_initialized_exactly_once_inside_create_stream() {
     let lines: std::vec::Vec<&str> = LIB_SRC.lines().collect();
-    for flag in FLAGS {
-        let hits: std::vec::Vec<(usize, &str)> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.trim() == format!("{flag},"))
-            .map(|(i, line)| (i + 1, *line))
-            .collect();
+    let hits: std::vec::Vec<(usize, &str)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("flags:"))
+        .map(|(i, line)| (i + 1, *line))
+        .collect();
 
-        assert_eq!(
-            hits.len(),
-            1,
-            "`{flag},` must appear exactly once (the create_stream initializer), found {hits:?}"
-        );
-        let (n, _) = hits[0];
-        let enclosing = enclosing_function(&lines, n - 1);
-        assert!(
-            matches!(enclosing, Some("create_stream")),
-            "{flag} initialized at lib.rs:{n} inside `{enclosing:?}`, expected create_stream"
-        );
-    }
+    assert_eq!(
+        hits.len(),
+        1,
+        "`flags` must be initialized exactly once in create_stream, found {hits:?}"
+    );
+    let (n, _) = hits[0];
+    let enclosing = enclosing_function(&lines, n - 1);
+    assert!(
+        matches!(enclosing, Some("create_stream")),
+        "flags initialized at lib.rs:{n} inside `{enclosing:?}`, expected create_stream"
+    );
 }
 
 /// The flag reads inside the mutating entry points are *guards*, not writes:
@@ -117,12 +113,12 @@ fn capability_guards_are_the_only_flag_touches_outside_creation() {
             }
         }
     }
-    // cancel, delegate_cancel, pause, delegate_pause, transfer_recipient,
-    // delegate_transfer_recipient each guard on exactly one flag.
+    // cancel, pause, transfer_recipient, and their delegate/batch variants
+    // guard on exactly one flag.
     assert_eq!(
         guards.len(),
-        6,
-        "expected exactly the six documented !stream.{flag} guards, got {guards:?}"
+        7,
+        "expected exactly the seven documented !stream.{flag} guards, got {guards:?}"
     );
     for (n, line) in &guards {
         assert!(
@@ -138,28 +134,25 @@ fn capability_guards_are_the_only_flag_touches_outside_creation() {
 /// part of the source, not just the tests.
 #[test]
 fn flag_fields_are_declared_immutable_in_types() {
-    for flag in FLAGS {
-        let decl = format!("pub {flag}: bool,");
-        let hits = flag_lines(TYPES_SRC, &decl);
-        assert_eq!(
-            hits.len(),
-            1,
-            "types.rs must declare `{decl}` exactly once, found {hits:?}"
-        );
-        let (n, line) = hits[0];
-        let previous_line = TYPES_SRC.lines().nth(n - 2).unwrap_or("");
-        assert!(
-            previous_line.contains("never mutable"),
-            "types.rs:{n}: `{flag}` is not documented as immutable — \
-             the line above it should say \"Fixed at creation, never mutable\": \
-             `{previous_line}`"
-        );
-        assert_eq!(
-            line.trim_start(),
-            decl,
-            "types.rs:{n}: `{flag}` mutated its declared spelling"
-        );
-    }
+    let decl = "pub flags: u8,";
+    let hits = flag_lines(TYPES_SRC, decl);
+    assert_eq!(
+        hits.len(),
+        1,
+        "types.rs must declare packed `{decl}` exactly once, found {hits:?}"
+    );
+    let (n, line) = hits[0];
+    let documentation = TYPES_SRC
+        .lines()
+        .skip(n.saturating_sub(6))
+        .take(5)
+        .collect::<std::vec::Vec<_>>()
+        .join("\n");
+    assert!(
+        documentation.contains("never mutable"),
+        "types.rs:{n}: packed flags are not documented as immutable: `{documentation}`"
+    );
+    assert_eq!(line.trim_start(), decl);
 }
 
 // ---------------------------------------------------------------------------

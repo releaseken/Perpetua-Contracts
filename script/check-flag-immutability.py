@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Verify the capability flags (cancellable, pausable, transferable) are immutable.
+"""Verify the packed capability flags are immutable.
 
 Issue #104. README.md's *Immutable guarantees* promises the three flags are
 fixed at creation and can never change. This is a static analysis over the
 production source (contracts/stream/src, excluding test/) and fails if:
 
-1. Any assignment to a flag field exists anywhere, e.g. `stream.cancellable = ...`
+1. Any assignment to the packed flags field exists anywhere, e.g. `stream.flags = ...`
    (the one shape that would let a setter exist).
-2. The flags are not initialized exactly once, inside `create_stream`, as
-   shorthand struct-literal fields.
+2. The packed flags field is not initialized exactly once inside `create_stream`.
 3. The `types.rs` declarations are not documented as immutable.
 
 The same structural rules are compiled into the crate's test suite
@@ -27,10 +26,10 @@ STREAM_SRC = REPO_ROOT / "contracts" / "stream" / "src"
 
 FLAGS = ("cancellable", "pausable", "transferable")
 
-# `=` not followed by `=`, so `stream.cancellable == x` (a comparison) is not
-# mistaken for an assignment. `!stream.cancellable` reads are untouched.
-ASSIGNMENT = re.compile(r"\.\s*(?:cancellable|pausable|transferable)\s*=(?!=)")
-SHORTHAND = re.compile(r"^\s*(?:cancellable|pausable|transferable),\s*$")
+# `=` not followed by `=`, so `stream.flags == x` is not mistaken for an
+# assignment.
+ASSIGNMENT = re.compile(r"\.\s*flags\s*=(?!=)")
+FLAGS_INIT = re.compile(r"^\s*flags\s*:")
 FN_DECL = re.compile(r"^\s*(?:pub\s+)?fn\s+(\w+)\(")
 
 
@@ -63,36 +62,34 @@ def check_file(path: Path, inits: dict[str, list[tuple[str, int]]]):
                 f"`{func}` — flags are immutable after create_stream: {line.strip()!r}"
             )
             continue
-        m = SHORTHAND.match(line)
+        m = FLAGS_INIT.match(line)
         if m:
-            flag = line.strip().rstrip(",")
             if func != "create_stream":
                 problems.append(
-                    f"{path.name}:{no}: capability flag `{flag}` initialized "
+                    f"{path.name}:{no}: packed capability flags initialized "
                     f"inside `{func}`, expected create_stream"
                 )
             else:
-                inits[flag].append((path.name, no))
+                inits["flags"].append((path.name, no))
     return problems
 
 
 def check_types(types_path: Path) -> list[str]:
-    """The struct fields must be `pub <flag>: bool` with an immutable doc."""
+    """The packed field must be `pub flags: u8` with an immutable doc."""
     problems: list[str] = []
     lines = types_path.read_text(encoding="utf-8").splitlines()
-    for flag in FLAGS:
-        decl = f"pub {flag}: bool"
-        hits = [i for i, l in enumerate(lines) if decl in l]
-        if len(hits) != 1:
-            problems.append(f"types.rs: {flag} should be declared exactly once")
-            continue
-        line_no = hits[0]
-        previous = lines[line_no - 1] if line_no else ""
-        if "never mutable" not in previous:
-            problems.append(
-                f"types.rs:{line_no + 1}: `{flag}` is not documented as immutable "
-                f"(line above should say 'Fixed at creation, never mutable')"
-            )
+    decl = "pub flags: u8"
+    hits = [i for i, l in enumerate(lines) if decl in l]
+    if len(hits) != 1:
+        problems.append("types.rs: packed flags should be declared exactly once")
+        return problems
+    line_no = hits[0]
+    documentation = "\n".join(lines[max(0, line_no - 6) : line_no])
+    if "never mutable" not in documentation:
+        problems.append(
+            f"types.rs:{line_no + 1}: packed flags are not documented as immutable "
+            f"(line above should say 'Fixed at creation, never mutable')"
+        )
     return problems
 
 
@@ -114,14 +111,14 @@ def main() -> int:
         return 0
 
     problems: list[str] = []
-    inits: dict[str, list[tuple[str, int]]] = {f: [] for f in FLAGS}
+    inits: dict[str, list[tuple[str, int]]] = {"flags": []}
     for path in production_sources():
         problems.extend(check_file(path, inits))
 
-    for flag, where in inits.items():
+    for field, where in inits.items():
         if len(where) != 1:
             problems.append(
-                f"{flag}: expected exactly one create_stream initializer, "
+                f"{field}: expected exactly one create_stream initializer, "
                 f"found {len(where)} in {where or 'no file'}"
             )
 
