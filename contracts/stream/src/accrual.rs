@@ -139,6 +139,17 @@ pub fn elapsed(stream: &Stream, now: u64) -> u64 {
 ///
 /// The gate is evaluated against the stream clock, so a stream paused across
 /// its cliff does not silently pass the cliff while frozen.
+///
+/// # Cliff Semantics vs Delayed Start
+///
+/// A cliff is a payout gate, NOT a delayed start schedule:
+/// - At `now < cliff_time` (e.g. `cliff_time - 1`), the cliff gate is closed
+///   and vested entitlement is strictly zero (`0`).
+/// - At `now == cliff_time`, the gate opens in a single discrete step, immediately
+///   releasing all value accrued continuously since `start_time` (not merely since
+///   `cliff_time`).
+/// - Subsequent to `cliff_time`, accrual continues linearly along the original
+///   schedule rate until `end_time`.
 pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
     stream_time(stream, now) >= stream.cliff_time
 }
@@ -152,6 +163,8 @@ pub fn cliff_reached(stream: &Stream, now: u64) -> bool {
 /// Before the cliff this is zero — the cliff *gates* the payout, it does not
 /// delay accrual, so at the cliff instant the recipient becomes entitled to
 /// everything accrued since `start_time`, not since `cliff_time`.
+/// Returns `Err(Error::Overflow)` (aka `Error::ArithmeticOverflow`) if any checked
+/// mathematical operation overflows.
 pub fn vested(stream: &Stream, now: u64) -> Result<i128, Error> {
     if !cliff_reached(stream, now) {
         return Ok(0);

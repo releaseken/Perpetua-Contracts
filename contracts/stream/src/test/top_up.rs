@@ -385,3 +385,59 @@ fn failed_transfer_reverts_state_and_ttl_changes() {
         "a reverted top-up publishes no events",
     );
 }
+
+/// Verification for Issue #5:
+/// 1. Strict down-rounding on duration extension floor(amount * duration / deposited).
+/// 2. Rejection of sub-second top-ups with TopUpTooSmall.
+/// 3. Rejection of top-ups on fully matured streams with StreamMatured.
+#[test]
+fn test_top_up_strict_down_rounding_and_matured_rejection() {
+    let h = Harness::new();
+    let start = h.now();
+    let initial_deposit = 1_000i128;
+    let initial_duration = 300u64;
+    let id = h.create(initial_deposit, start, start + initial_duration, start, true, true, true);
+
+    // 1. Rejection of sub-second top-up:
+    // amount = 1 stroop: 1 * 300 / 1000 = 0 seconds extension.
+    // Absorbing it would lower or distort the rate; must reject with TopUpTooSmall.
+    let err = h.client.try_top_up(&id, &1).unwrap_err().unwrap();
+    assert_eq!(err, Error::TopUpTooSmall);
+
+    // 2. Strict down-rounding:
+    // amount = 7 stroops: 7 * 300 / 1000 = 2100 / 1000 = 2 seconds (floored).
+    // Rounding up would yield 3 seconds, which would lower the per-second rate.
+    h.client.top_up(&id, &7);
+    let s = h.get(id);
+    assert_eq!(s.deposited, 1_007);
+    assert_eq!(
+        s.end_time,
+        start + initial_duration + 2,
+        "extension strictly rounded down to 2 seconds",
+    );
+
+    // Another awkward top-up:
+    // current deposited = 1007, current duration = 302.
+    // amount = 10 stroops: 10 * 302 / 1007 = 3020 / 1007 = 2 seconds (floored).
+    let end_before = s.end_time;
+    h.client.top_up(&id, &10);
+    let s2 = h.get(id);
+    assert_eq!(s2.deposited, 1_017);
+    assert_eq!(
+        s2.end_time,
+        end_before + 2,
+        "extension strictly rounded down to 2 seconds",
+    );
+
+    // 3. Rejection of top-up on matured stream:
+    h.warp_to(s2.end_time);
+    let err_matured = h.client.try_top_up(&id, &100).unwrap_err().unwrap();
+    assert_eq!(err_matured, Error::StreamMatured);
+
+    // Even further in the future:
+    h.advance(YEAR);
+    let err_matured2 = h.client.try_top_up(&id, &100).unwrap_err().unwrap();
+    assert_eq!(err_matured2, Error::StreamMatured);
+
+    h.assert_pool_exact();
+}
