@@ -664,6 +664,10 @@ def restoration_guidance(archived_ids: list[int] | tuple[int, ...]) -> dict:
         "tool": RESTORE_FOOTPRINT_TOOL,
         "proposal_ids": ids,
         "footprint_keys": [f"Proposal({pid})" for pid in ids] + [f"QuorumReachedAt({pid})" for pid in ids],
+        "commands": [
+            f"stellar contract restore --id <GOVERNANCE_CONTRACT_ID> --key '[\"Proposal\", {pid}]'"
+            for pid in ids
+        ],
         "steps": [
             f"1. Generate footprint restoration transaction for proposal entries: {ids} using {RESTORE_FOOTPRINT_TOOL}.",
             "2. Submit RestoreFootprintOp on-chain to restore the archived entries from state archival into live storage.",
@@ -671,6 +675,7 @@ def restoration_guidance(archived_ids: list[int] | tuple[int, ...]) -> dict:
             "4. Re-submit the voting or execution transaction. Proposal IDs are immutable, ensuring idempotent retry.",
         ],
     }
+
 
 
 def idempotent_retry(
