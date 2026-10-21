@@ -180,6 +180,83 @@ class TestLedgerReadSkewScenarios(unittest.TestCase):
         self.assertEqual(result["result"], "SUCCESS_ALREADY_APPLIED")
         self.assertTrue(on_chain_ledger_state["transferred"])
 
+    def test_cross_call_derivation_read_skew_detection(self):
+        """Simulate two consecutive RPC view calls hitting skewed replicas.
+
+        Verifies detection of arithmetic invariant violation (vested + refundable != deposited)
+        caused by five seconds of un-synchronized accrual.
+        """
+        deposited = 600_000_000
+        rate_per_sec = 1_000_000
+
+        # Call 1 (vested_of at ledger L1=1005)
+        ledger_l1 = 1005
+        vested = 27_000_000  # accrued up to L1
+
+        # Call 2 (refundable_of at skewed lagging replica L0=1000)
+        ledger_l0 = 1000
+        refundable = 583_000_000  # corresponds to L0 (5 seconds behind)
+
+        # Invariant check:
+        derived_sum = vested + refundable
+        discrepancy = derived_sum - deposited
+
+        # Exactly 5 seconds * 1M stroops/sec discrepancy
+        expected_drift = (ledger_l1 - ledger_l0) * rate_per_sec
+        self.assertEqual(discrepancy, expected_drift)
+        self.assertNotEqual(derived_sum, deposited, "Read skew produces arithmetic mismatch")
+
+        # Barrier pin: require both reads to originate from the identical ledger sequence
+        def evaluate_pinned_reads(read_a, read_b):
+            if read_a["ledger"] != read_b["ledger"]:
+                return {"status": "READ_SKEW_DETECTED", "valid": False}
+            return {
+                "status": "CONSISTENT",
+                "valid": (read_a["val"] + read_b["val"]) == deposited,
+            }
+
+        skewed_result = evaluate_pinned_reads(
+            {"val": vested, "ledger": ledger_l1},
+            {"val": refundable, "ledger": ledger_l0},
+        )
+        self.assertFalse(skewed_result["valid"])
+        self.assertEqual(skewed_result["status"], "READ_SKEW_DETECTED")
+
+        # When pinned to same ledger L1
+        consistent_result = evaluate_pinned_reads(
+            {"val": vested, "ledger": ledger_l1},
+            {"val": deposited - vested, "ledger": ledger_l1},
+        )
+        self.assertTrue(consistent_result["valid"])
+        self.assertEqual(consistent_result["status"], "CONSISTENT")
+
+    def test_multi_entry_batch_restoration_lifecycle(self):
+        """Verify full lifecycle: detection -> guidance -> simulated restoration -> live confirmation."""
+        # Initial state: entries 10 and 12 are archived, 11 is live, count is 15
+        stream_ids = [10, 11, 12]
+        liveness_before = {10: False, 11: True, 12: False}
+        stream_count = 15
+
+        step1_detect = ebb.detect_archival_state(
+            stream_ids, liveness=liveness_before, stream_count=stream_count
+        )
+        self.assertEqual(step1_detect["status"], ebb.ERR_ARCHIVED_ENTRY)
+        self.assertEqual(step1_detect["archived"], [10, 12])
+
+        step2_guidance = ebb.restoration_guidance(step1_detect["archived"])
+        self.assertEqual(step2_guidance["status"], ebb.ERR_ARCHIVED_ENTRY)
+        self.assertEqual(step2_guidance["stream_ids"], [10, 12])
+
+        # Simulate execution of RestoreFootprintOp on ledger
+        liveness_after = {10: True, 11: True, 12: True}
+        step3_verify = ebb.detect_archival_state(
+            stream_ids, liveness=liveness_after, stream_count=stream_count
+        )
+        self.assertEqual(step3_verify["status"], ebb.ERR_OK)
+        self.assertEqual(step3_verify["archived"], [])
+        self.assertTrue(all(s == ebb.STATE_LIVE for s in step3_verify["states"].values()))
+
 
 if __name__ == "__main__":
     unittest.main()
+
