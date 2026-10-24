@@ -25,6 +25,7 @@ import { Stream, StreamStatus } from './types.js';
 export interface BatchStreamLookupOptions {
   readonly contractId: string;
   readonly streamIds: bigint[];
+  readonly retryOptions?: RetryOptions;
 }
 
 /** Hard cap on unique ids per `getLedgerEntries` call (keeps request/XDR size bounded). */
@@ -33,6 +34,58 @@ export const MAX_BATCH_LOOKUP = 200;
 export interface BatchStreamLookupHealth {
   readonly status?: string;
 }
+
+export interface RetryOptions {
+  readonly maxRetries?: number;
+  readonly baseDelayMs?: number;
+  readonly maxDelayMs?: number;
+  readonly timeoutMs?: number;
+}
+
+/**
+ * Idempotent retry helper for read invocations.
+ * Retries on network partitions, 429/503 rate limits, and timeouts with exponential backoff.
+ */
+export async function withIdempotentRetry<T>(
+  operation: (attempt: number) => Promise<T>,
+  opts: RetryOptions = {},
+): Promise<T> {
+  const maxRetries = opts.maxRetries ?? 3;
+  const baseDelay = opts.baseDelayMs ?? 50;
+  const maxDelay = opts.maxDelayMs ?? 1000;
+  const timeoutMs = opts.timeoutMs ?? 10000;
+
+  let attempt = 0;
+  while (true) {
+    try {
+      let timeoutHandle: any;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(`Operation timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      });
+
+      const opPromise = operation(attempt);
+      const res = await Promise.race([opPromise, timeoutPromise]);
+      clearTimeout(timeoutHandle);
+      return res;
+    } catch (err: any) {
+      attempt++;
+      if (attempt > maxRetries) {
+        throw err;
+      }
+      // Check if error is non-retryable (e.g., explicit client invariant violation)
+      const msg = String(err?.message ?? "");
+      if (msg.includes("batch too large") || msg.includes("invalid contract")) {
+        throw err;
+      }
+      const jitter = Math.random() * 0.2 + 0.9;
+      const delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt - 1)) * jitter;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 
 function streamIdFromKey(scVal: unknown): bigint | null {
   const native = Array.isArray(scVal)
@@ -83,8 +136,12 @@ export async function batchGetStreams(
     seen.add(streamId);
     keys.push(buildStreamLedgerKey(contractId, streamId));
   }
-  const result = await server.getLedgerEntries(keys as any);
+  const result = await withIdempotentRetry(
+    () => server.getLedgerEntries(keys as any),
+    opts.retryOptions
+  );
   const values = new Map<bigint, Stream>();
+
 
   for (const entry of result.entries ?? []) {
     const data = entry?.val?.contractData?.();

@@ -98,4 +98,49 @@ describe('batchGetStreams', () => {
     expect(performance.now() - t).toBeLessThan(2000);
     expect(server.getLedgerEntries.mock.calls[0]![0]).toHaveLength(MAX_BATCH_LOOKUP);
   });
+
+  it('retries transient failures idempotently up to maxRetries', async () => {
+    const contractId = StrKey.encodeContract(new Uint8Array(32).fill(0x11));
+    let attempts = 0;
+    const server = {
+      getHealth: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      getLedgerEntries: vi.fn().mockImplementation(async () => {
+        attempts++;
+        if (attempts < 3) {
+          throw new Error('503 Service Unavailable');
+        }
+        return { entries: [] };
+      }),
+    };
+
+    const res = await batchGetStreams(server as any, {
+      contractId,
+      streamIds: [1n],
+      retryOptions: { maxRetries: 3, baseDelayMs: 5 },
+    });
+    expect(attempts).toBe(3);
+    expect(res).toBeInstanceOf(Map);
+  });
+
+  it('fails fast on non-retryable errors without retrying', async () => {
+    const contractId = StrKey.encodeContract(new Uint8Array(32).fill(0x11));
+    let attempts = 0;
+    const server = {
+      getHealth: vi.fn().mockResolvedValue({ status: 'healthy' }),
+      getLedgerEntries: vi.fn().mockImplementation(async () => {
+        attempts++;
+        throw new Error('invalid contract address');
+      }),
+    };
+
+    await expect(
+      batchGetStreams(server as any, {
+        contractId,
+        streamIds: [1n],
+        retryOptions: { maxRetries: 3, baseDelayMs: 5 },
+      })
+    ).rejects.toThrow('invalid contract address');
+    expect(attempts).toBe(1);
+  });
 });
+

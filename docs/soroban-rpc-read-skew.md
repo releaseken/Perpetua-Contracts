@@ -983,3 +983,29 @@ same rules:
 - **Idempotent retry.** `retryIdempotent` checks whether the invocation already
   landed before every attempt, retries only `TRY_AGAIN_LATER`/timeouts, and
   never retries contract errors (escalate instead).
+
+## Operator Runbook: Idempotent Retries & Read-Skew Mitigation
+
+### 1. Alerting & Incident Triggers
+- **Trigger A (Ledger Regression):** `latestLedger(t1) < latestLedger(t0)` detected by RPC sentinel probes.
+- **Trigger B (Stale Read Skew):** Multiple view calls within the same transaction derive inconsistent values (e.g., `vested + refundable != deposited`).
+- **Trigger C (Transient RPC Exhaustion):** Invocations return HTTP 429, HTTP 503, or connection timeouts.
+
+### 2. Immediate Operator Steps
+1. **Verify Endpoint Health:**
+   ```bash
+   curl -s -X POST "$SOROBAN_RPC_URL" \
+     -H 'Content-Type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+   ```
+2. **Apply Idempotent Retry Barrier:**
+   - In frontend/SDK clients, configure `withIdempotentRetry` with bounded exponential backoff (`maxRetries: 3`, `baseDelayMs: 50`, `maxDelayMs: 1000`).
+   - For mutation retries, verify whether the transaction hash or sequence already executed before rebroadcasting.
+3. **Execute Archival Footprint Restoration:**
+   - If `stream_exists(id) == false` while `id < stream_count()`, execute footprint restoration:
+     ```bash
+     stellar contract restore --id "$CONTRACT_ID" --key "['Stream', $STREAM_ID]" --network "$NETWORK"
+     ```
+4. **Failover RPC Endpoint:**
+   - If skew persists across node replicas behind a load balancer, route traffic to a synchronized single-node backup endpoint or pinned ledger sequence.
+
