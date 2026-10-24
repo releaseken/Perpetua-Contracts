@@ -628,3 +628,53 @@ class TestCrossModuleIntegration:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "warning" not in result.stdout.lower()
 
+
+# ---------------------------------------------------------------------------
+# Archival Detection & Footprint Restoration Guidance
+# ---------------------------------------------------------------------------
+
+
+class TestArchivalDetectionAndRestorationGuidance:
+    """Verifies that archival detection identifies archived entries deterministically
+    and provides actionable footprint restoration guidance.
+    """
+
+    def test_detects_live_and_archived_proposals(self):
+        res = ggm.detect_archival_state(
+            [0, 1, 2],
+            liveness={0: True, 1: False},
+            proposal_count=2,
+        )
+        assert res["status"] == ggm.ERR_ARCHIVED_ENTRY
+        assert res["states"][0] == ggm.STATE_LIVE
+        assert res["states"][1] == ggm.STATE_ARCHIVED
+        assert res["states"][2] == ggm.STATE_MISSING
+        assert res["archived"] == [1]
+
+    def test_restoration_guidance_structure(self):
+        guidance = ggm.restoration_guidance([1, 3])
+        assert guidance["status"] == ggm.ERR_ARCHIVED_ENTRY
+        assert guidance["proposal_ids"] == [1, 3]
+        assert "Proposal(1)" in guidance["footprint_keys"]
+        assert "Proposal(3)" in guidance["footprint_keys"]
+        assert len(guidance["commands"]) == 2
+        assert any("stellar contract restore" in c for c in guidance["commands"])
+        assert len(guidance["steps"]) == 4
+
+    def test_rejects_invalid_inputs_early(self):
+        assert ggm.detect_archival_state("not a list")["status"] == ggm.ERR_INVALID_INPUT
+        assert ggm.detect_archival_state([-1])["status"] == ggm.ERR_INVALID_INPUT
+        assert ggm.restoration_guidance("bad")["status"] == ggm.ERR_INVALID_INPUT
+
+    def test_cli_check_archival_flag(self):
+        result = subprocess.run(
+            [sys.executable, str(_SCRIPT), "--check-archival", "--proposal-ids", "0", "--proposal-count", "1", "--json"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1  # 0 < 1 without liveness => archived => exit 1
+        data = json.loads(result.stdout)
+        assert data["ok"] is False
+        assert data["archival"]["status"] == ggm.ERR_ARCHIVED_ENTRY
+
+
