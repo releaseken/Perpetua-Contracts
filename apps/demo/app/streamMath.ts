@@ -1,4 +1,4 @@
-export type StreamStatus = "active" | "paused" | "cancelled";
+export type StreamStatus = "active" | "paused" | "cancelled" | "archived";
 
 export interface DashStream {
   id: number;
@@ -15,7 +15,8 @@ export type InvariantError =
   | "NON_FINITE"
   | "VESTED_EXCEEDS_DEPOSIT"
   | "UNSAFE_INTEGER"
-  | "BATCH_TOO_LARGE";
+  | "BATCH_TOO_LARGE"
+  | "EMPTY_RECIPIENT";
 
 export const MAX_STREAMS = 1_000;
 
@@ -28,6 +29,9 @@ export class InvariantViolation extends Error {
 
 /** Reject degenerate rows before they reach the UI; never wraps or clamps silently. */
 export function assertStreamInvariants(s: DashStream): void {
+  if (!s.recipient || s.recipient.trim() === "") {
+    throw new InvariantViolation("EMPTY_RECIPIENT", `stream ${s.id}`);
+  }
   for (const v of [s.deposited, s.vested, s.ratePerSec]) {
     if (!Number.isFinite(v)) throw new InvariantViolation("NON_FINITE", `stream ${s.id}`);
     if (v < 0) throw new InvariantViolation("NEGATIVE_VALUE", `stream ${s.id}`);
@@ -70,3 +74,37 @@ export function summarize(streams: readonly DashStream[]): Summary {
   }
   return { active, totalVested, totalDeposited };
 }
+
+/** Fault-recovery wrapper that catches invariant errors and reports safe fallback. */
+export function safeSummarize(streams: readonly DashStream[]): {
+  summary: Summary;
+  error?: InvariantViolation;
+} {
+  try {
+    return { summary: summarize(streams) };
+  } catch (err) {
+    if (err instanceof InvariantViolation) {
+      return {
+        summary: { active: 0, totalVested: 0, totalDeposited: 0 },
+        error: err,
+      };
+    }
+    throw err;
+  }
+}
+
+/** Return status badge styling with archival resilience. */
+export function getStatusBadgeClass(status: StreamStatus): string {
+  switch (status) {
+    case "active":
+      return "bg-emerald-500/10 text-emerald-300";
+    case "paused":
+      return "bg-amber-500/10 text-amber-300";
+    case "archived":
+      return "bg-purple-500/10 text-purple-300";
+    case "cancelled":
+    default:
+      return "bg-rose-500/10 text-rose-300";
+  }
+}
+

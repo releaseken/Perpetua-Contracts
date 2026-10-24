@@ -1,19 +1,27 @@
-import { summarize, vestedPct, type DashStream as Stream } from "./streamMath";
+import {
+  getStatusBadgeClass,
+  safeSummarize,
+  vestedPct,
+  type DashStream as Stream,
+} from "./streamMath";
 
 // Sample ledger — the reference UI wires this to soroban simulation once the
 // contract bindings land (stage 5/6); here it is static proof of the layout.
-const streams: Stream[] = [
+export const sampleStreams: Stream[] = [
   { id: 1, recipient: "GALAX…7QKD", deposited: 48_000, vested: 21_830, ratePerSec: 0.251, status: "active" },
   { id: 2, recipient: "GBLOOM…2HZX", deposited: 12_500, vested: 12_500, ratePerSec: 0.062, status: "active" },
   { id: 3, recipient: "GNOVA…9PQA", deposited: 6_000, vested: 1_120, ratePerSec: 0.033, status: "paused" },
+  { id: 4, recipient: "GARCH…4MKL", deposited: 25_000, vested: 25_000, ratePerSec: 0.0, status: "archived" },
 ];
 
-function fmt(n: number) {
+export function fmt(n: number): string {
+  if (!Number.isFinite(n)) return "0.00";
   return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
-export default function Dashboard() {
-  const { active, totalVested, totalDeposited } = summarize(streams);
+export default function Dashboard({ streams = sampleStreams }: { streams?: Stream[] } = {}) {
+  const { summary, error } = safeSummarize(streams);
+  const { active, totalVested, totalDeposited } = summary;
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-12">
@@ -26,6 +34,13 @@ export default function Dashboard() {
           New stream (stage 6)
         </span>
       </header>
+
+      {error && (
+        <div className="mt-6 rounded-xl border border-rose-800/80 bg-rose-950/40 p-4 text-sm text-rose-300">
+          <p className="font-semibold">Invariant Violation Encountered</p>
+          <p className="text-xs text-rose-400/90 mt-1">{error.message}</p>
+        </div>
+      )}
 
       <section className="mt-10 grid grid-cols-1 gap-4 sm:grid-cols-3">
         <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-5">
@@ -71,13 +86,9 @@ export default function Dashboard() {
                 </p>
               </div>
               <span
-                className={`col-span-2 w-fit rounded-full px-2 py-0.5 text-xs capitalize ${
-                  s.status === "active"
-                    ? "bg-emerald-500/10 text-emerald-300"
-                    : s.status === "paused"
-                      ? "bg-amber-500/10 text-amber-300"
-                      : "bg-rose-500/10 text-rose-300"
-                }`}
+                className={`col-span-2 w-fit rounded-full px-2 py-0.5 text-xs capitalize ${getStatusBadgeClass(
+                  s.status
+                )}`}
               >
                 {s.status}
               </span>
