@@ -56,6 +56,17 @@ export function detectArchivedStream(
   return streamExists === false && id < count;
 }
 
+/** Hard caps so a misconfigured caller cannot spin or sleep unboundedly. */
+export const MAX_RESTORE_ATTEMPTS = 10;
+export const MAX_RESTORE_BACKOFF_MS = 60_000;
+const U64_MAX = 18_446_744_073_709_551_615n;
+
+/**
+ * Frozen layout of the persistent key, mirroring `DataKey::Stream(u64)` in
+ * `docs/ABI.md` (`data_keys.Stream`): ScVec[Symbol("Stream"), U64(stream_id)].
+ */
+export const STREAM_KEY_SCHEMA = { variant: "Stream", fields: ["u64"], durability: "persistent" } as const;
+
 export interface RestoreAndRetryParams extends RestoreFootprintParams {
   /** Maximum number of restore attempts before giving up. Defaults to 3. */
   maxAttempts?: number;
@@ -104,6 +115,12 @@ export async function restoreAndRetry<T>(
   const maxAttempts = params.maxAttempts ?? 3;
   const backoffMs = params.backoffMs ?? 1000;
   const sleep = params.sleep ?? defaultSleep;
+  if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 0 || maxAttempts > MAX_RESTORE_ATTEMPTS) {
+    throw new Error(`maxAttempts must be an integer in [0, ${MAX_RESTORE_ATTEMPTS}]`);
+  }
+  if (!Number.isFinite(backoffMs) || backoffMs < 0 || backoffMs > MAX_RESTORE_BACKOFF_MS) {
+    throw new Error(`backoffMs must be in [0, ${MAX_RESTORE_BACKOFF_MS}]`);
+  }
 
   let attempts = 0;
   let restored = false;
@@ -162,7 +179,7 @@ export function restoreFootprintData(key: xdr.LedgerKey): xdr.SorobanTransaction
 /** Build the persistent ledger key used by DataKey::Stream(streamId). */
 export function streamLedgerKey(contractId: string, streamId: bigint | number | string): xdr.LedgerKey {
   const id = BigInt(streamId);
-  if (id < 0n || id > 18_446_744_073_709_551_615n) {
+  if (id < 0n || id > U64_MAX) {
     throw new Error("stream_id must be an unsigned 64-bit integer");
   }
 
