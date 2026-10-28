@@ -803,3 +803,18 @@ and `sdk/react-hooks/src/useStream.ts` consume the `Stream` mirror and the
 `tests/fixtures/event_snapshots/withdrawn.json`. To reconstruct state, fold
 events in ledger order by `stream_id` (topic 1); a client must never apply a
 read from a ledger older than one already applied.
+
+### Restore footprint and wallet SDK parity (`restore_footprint.ts`, `wallet.ts`)
+
+* The restore key is `ScVec[Symbol("Stream"), U64(stream_id)]`, persistent
+  durability (`DataKey::Stream`, see `docs/ABI.md`). `stream_id` outside
+  `[0, 2^64-1]` is rejected. Archived means
+  `stream_exists == false && stream_id < stream_count`.
+* `wallet.ts` encodes `create_stream` as `deposit:i128`, times as `u64`
+  (never `parseInt`/float). Rejections are deterministic `WalletParamError`
+  codes: `InvalidDeposit`, `InvalidStartTime`, `InvalidEndTime`,
+  `InvalidCliffTime`, `InvalidTimeRange`, `InvalidCliff`, `InvalidStreamId`,
+  `InvalidAmount`.
+* Reconstruct by folding `stream_created`/`withdrawn`/... events by
+  `stream_id` in ledger order. Golden fixtures:
+  `restore_footprint_key.json`, `wallet_create_stream.json`.

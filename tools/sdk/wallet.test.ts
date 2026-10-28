@@ -57,3 +57,35 @@ describe("signWithWallet errors", () => {
     await expect(signWithWallet("albedo", "x", "G")).rejects.toThrow("not installed");
   });
 });
+
+import { validateCreateStreamParams, validateWithdrawParams } from "./wallet";
+
+describe("wallet invariants", () => {
+  const ok = {
+    contractId: "", sender: "", recipient: "", token: "", deposit: "100", startTime: "10",
+    endTime: "20", cliffTime: "10", cancellable: true, pausable: true, transferable: true,
+    networkPassphrase: "", horizonUrl: "",
+  };
+  it("accepts i128::MAX deposit and zero-duration cliff", () => {
+    const r = validateCreateStreamParams({ ...ok, deposit: ((1n << 127n) - 1n).toString() });
+    expect(r.cliff).toBe(10n);
+  });
+  it.each([
+    [{ deposit: "0" }, "InvalidDeposit"],
+    [{ deposit: (1n << 127n).toString() }, "InvalidDeposit"],
+    [{ deposit: "-1" }, "InvalidDeposit"],
+    [{ deposit: "1e3" }, "InvalidDeposit"],
+    [{ endTime: "10" }, "InvalidTimeRange"],
+    [{ cliffTime: "9" }, "InvalidCliff"],
+    [{ cliffTime: "21" }, "InvalidCliff"],
+    [{ startTime: (1n << 64n).toString() }, "InvalidStartTime"],
+  ])("rejects %j", (patch, code) => {
+    expect(() => validateCreateStreamParams({ ...ok, ...patch })).toThrow(code);
+  });
+  it("validates withdraw", () => {
+    const w = { contractId: "", recipient: "", streamId: 1, amount: null, networkPassphrase: "", horizonUrl: "" };
+    expect(validateWithdrawParams(w)).toBeNull();
+    expect(() => validateWithdrawParams({ ...w, amount: "0" })).toThrow("InvalidAmount");
+    expect(() => validateWithdrawParams({ ...w, streamId: -1 })).toThrow("InvalidStreamId");
+  });
+});
