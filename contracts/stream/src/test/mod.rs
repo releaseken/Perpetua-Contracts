@@ -84,3 +84,18 @@ mod accrual_indexer_parity;
 // CPU/memory budgets under batch payroll workloads (MAX_BATCH_SIZE streams,
 // pause/resume history, no super-linear growth).
 mod accrual_budget;
+
+// Issue #407: cliff-vesting error taxonomy and human-readable messages.
+mod cliff_error_taxonomy;
+
+// Issue #408: cliff-phase TTL automation — creation coverage, keeper path,
+// paused-stream wall-clock drift.
+mod cliff_ttl_tests;
+
+// Issue #409: batch cross-contract invocation optimisation — token-group
+// coalescing, homogeneous-batch fast path, conservation across grouping.
+mod batch_opt_tests;
+
+// Issue #411: precision-safe fractional withdrawal arithmetic — split
+// conservation, proportional_withdraw, withdraw_with_reserve, batch split.
+mod withdrawal_math_tests;

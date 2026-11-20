@@ -1,0 +1,24 @@
+{
+  "source": "tools/sdk/wallet.ts",
+  "abi_version": "1.0.0",
+  "create_stream_args": [
+    "recipient:Address", "token:Address", "deposit:i128", "start_time:u64",
+    "end_time:u64", "cliff_time:u64", "cancellable:bool", "pausable:bool", "transferable:bool"
+  ],
+  "error_codes": [
+    "InvalidDeposit", "InvalidStartTime", "InvalidEndTime", "InvalidCliffTime",
+    "InvalidTimeRange", "InvalidCliff", "InvalidStreamId", "InvalidAmount"
+  ],
+  "bounds": { "deposit_max": "170141183460469231731687303715884105727", "time_max": "18446744073709551615" },
+  "events": [
+    {
+      "topic": ["stream_created", "stream_id"],
+      "data": {
+        "stream_id": "1",
+        "sender": "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF5",
+        "recipient": "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "amount": "1000000000"
+      }
+    }
+  ]
+}
