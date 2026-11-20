@@ -1,0 +1,18 @@
+{
+  "source": "tools/sdk/restore_footprint.ts",
+  "abi_version": "1.0.0",
+  "ledger_key": {
+    "type": "contractData",
+    "durability": "persistent",
+    "key": ["Symbol:Stream", "u64:stream_id"]
+  },
+  "stream_id_range": ["0", "18446744073709551615"],
+  "archived_predicate": "stream_exists == false && stream_id < stream_count",
+  "caps": { "max_attempts": 10, "max_backoff_ms": 60000 },
+  "events": [
+    {
+      "topic": ["ttl_extended", "stream_id"],
+      "data": { "stream_id": "1", "extended_to": 1800000 }
+    }
+  ]
+}

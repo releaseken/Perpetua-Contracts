@@ -1,0 +1,51 @@
+# Perpetua pause-clock contract — standalone Cargo project.
+#
+# Tracks a global paused/active state for a stream contract and
+# records the total cumulative paused duration across all streams.
+# Provides a lightweight cache layer so batch-claim callers can read
+# one entry instead of querying every individual stream.
+#
+#   cargo build  --target wasm32v1-none --release
+#   cargo test
+
+[workspace]
+resolver = "2"
+members = ["."]
+
+[package]
+name = "perpetua-pause-clock"
+description = "Global pause-clock registry for Perpetua streams"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+repository = "https://github.com/hannyloveworld/Perpetua-Contracts"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+[dependencies]
+soroban-sdk = "27.0.6"
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = 0
+debug-assertions = false
+overflow-checks = true
+incremental = false
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true

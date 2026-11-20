@@ -418,3 +418,16 @@ const { stream, loading, error, refresh } = useStream(42n, { refreshIntervalMs: 
 - `usePerpetua requires a <PerpetuaProvider> ancestor`: wrap the app in `PerpetuaProvider`.
 - Stuck `loading`: `enabled: false` suspends fetching; concurrent `refresh()` calls are dropped.
 - `error` is always an `Error` and clears on the next successful fetch.
+
+## SDK restore/wallet budgets (`tools/sdk/restore_footprint.ts`, `tools/sdk/wallet.ts`)
+
+| Path | Bound | Enforced by |
+|---|---|---|
+| `restoreAndRetry` attempts | `MAX_RESTORE_ATTEMPTS = 10` | `restore_footprint.test.ts` |
+| `restoreAndRetry` backoff | `MAX_RESTORE_BACKOFF_MS = 60000` | `restore_footprint.test.ts` |
+| RestoreFootprint resources | 1 write key, 0 read keys | `restoreFootprintData` |
+
+Wallet invariants (`validateCreateStreamParams`, `validateWithdrawParams`): deposit and
+withdraw amount in `(0, i128::MAX]`; times in `[0, u64::MAX]`; `end > start`;
+`start <= cliff <= end`; no silent wrapping or float coercion. Off-chain only; contract WASM
+budget (`script/check-stream-wasm-size.sh`) is unaffected.

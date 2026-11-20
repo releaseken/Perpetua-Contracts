@@ -19,6 +19,7 @@ import {
   Operation,
   Server,
   TransactionBuilder,
+  nativeToScVal,
   xdr,
 } from "@stellar/stellar-sdk";
 
@@ -88,6 +89,57 @@ export interface WithdrawParams {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+const I128_MAX = (1n << 127n) - 1n;
+const U64_MAX = (1n << 64n) - 1n;
+
+/** Deterministic error codes for degenerate wallet parameters. */
+export class WalletParamError extends Error {
+  constructor(public readonly code: string, message: string) {
+    super(`${code}: ${message}`);
+    this.name = "WalletParamError";
+  }
+}
+
+function parseUint(code: string, value: string, max: bigint): bigint {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new WalletParamError(code, "must be a base-10 unsigned integer string");
+  }
+  const n = BigInt(value);
+  if (n > max) throw new WalletParamError(code, "exceeds maximum");
+  return n;
+}
+
+/**
+ * Validate create_stream parameters before any XDR is built.  Mirrors the
+ * contract's preconditions (docs/ABI.md "Invariants enforced before event
+ * emission"); never wraps or clamps.
+ */
+export function validateCreateStreamParams(p: CreateStreamParams): {
+  deposit: bigint; start: bigint; end: bigint; cliff: bigint;
+} {
+  const deposit = parseUint("InvalidDeposit", p.deposit, I128_MAX);
+  if (deposit === 0n) throw new WalletParamError("InvalidDeposit", "deposit must be positive");
+  const start = parseUint("InvalidStartTime", p.startTime, U64_MAX);
+  const end = parseUint("InvalidEndTime", p.endTime, U64_MAX);
+  const cliff = parseUint("InvalidCliffTime", p.cliffTime, U64_MAX);
+  if (end <= start) throw new WalletParamError("InvalidTimeRange", "end must be after start");
+  if (cliff < start || cliff > end) {
+    throw new WalletParamError("InvalidCliff", "cliff must lie within [start, end]");
+  }
+  return { deposit, start, end, cliff };
+}
+
+/** Validate withdraw parameters; returns the amount (null = full balance). */
+export function validateWithdrawParams(p: WithdrawParams): bigint | null {
+  if (!Number.isSafeInteger(p.streamId) || p.streamId < 0) {
+    throw new WalletParamError("InvalidStreamId", "streamId must be a non-negative safe integer");
+  }
+  if (p.amount === null) return null;
+  const amount = parseUint("InvalidAmount", p.amount, I128_MAX);
+  if (amount === 0n) throw new WalletParamError("InvalidAmount", "amount must be positive");
+  return amount;
+}
+
 /** Build a Soroban transaction envelope with the given operations. */
 function buildTransaction(
   source: string,
@@ -141,6 +193,7 @@ export function buildCreateStreamTransaction(
     horizonUrl,
   } = params;
 
+  const v = validateCreateStreamParams(params);
   const contract = new Contract(contractId);
   const source = Address.fromString(sender).toString();
 
@@ -148,10 +201,10 @@ export function buildCreateStreamTransaction(
     "create_stream",
     Address.fromString(recipient),
     Address.fromString(token),
-    parseInt(deposit, 10),
-    parseInt(startTime, 10),
-    parseInt(endTime, 10),
-    parseInt(cliffTime, 10),
+    nativeToScVal(v.deposit, { type: "i128" }),
+    nativeToScVal(v.start, { type: "u64" }),
+    nativeToScVal(v.end, { type: "u64" }),
+    nativeToScVal(v.cliff, { type: "u64" }),
     cancellable,
     pausable,
     transferable,
@@ -194,6 +247,7 @@ export function buildWithdrawTransaction(
   const { contractId, recipient, streamId, amount, networkPassphrase, horizonUrl } =
     params;
 
+  validateWithdrawParams(params);
   const source = Address.fromString(recipient).toString();
   const contract = new Contract(contractId);
 

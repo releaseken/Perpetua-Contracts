@@ -227,3 +227,21 @@ describe("restoreAndRetry ledger skew", () => {
     expect(invoke).not.toHaveBeenCalled();
   });
 });
+
+import { describe as d2, expect as e2, it as i2 } from "vitest";
+import { MAX_RESTORE_ATTEMPTS, STREAM_KEY_SCHEMA, restoreAndRetry as rr, streamLedgerKey as slk } from "./restore_footprint";
+
+d2("restore_footprint hardening", () => {
+  const C = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+  i2("rejects out-of-range attempt/backoff caps", async () => {
+    const read = async () => ({ streamExists: true, streamCount: 1, value: 1 });
+    const base = { contractId: C, streamId: 0, source: "", networkPassphrase: "", horizonUrl: "" };
+    await e2(rr({ ...base, maxAttempts: MAX_RESTORE_ATTEMPTS + 1 }, read)).rejects.toThrow(/maxAttempts/);
+    await e2(rr({ ...base, backoffMs: -1 }, read)).rejects.toThrow(/backoffMs/);
+  });
+  i2("pins key schema and u64 bounds", () => {
+    e2(STREAM_KEY_SCHEMA.variant).toBe("Stream");
+    e2(() => slk(C, -1)).toThrow();
+    e2(() => slk(C, 18_446_744_073_709_551_616n)).toThrow();
+  });
+});

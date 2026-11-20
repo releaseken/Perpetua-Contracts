@@ -84,3 +84,56 @@ mod accrual_indexer_parity;
 // CPU/memory budgets under batch payroll workloads (MAX_BATCH_SIZE streams,
 // pause/resume history, no super-linear growth).
 mod accrual_budget;
+
+// Issue #407: cliff-vesting error taxonomy and human-readable messages.
+mod cliff_error_taxonomy;
+
+// Issue #408: cliff-phase TTL automation — creation coverage, keeper path,
+// paused-stream wall-clock drift.
+mod cliff_ttl_tests;
+
+// Issue #409: batch cross-contract invocation optimisation — token-group
+// coalescing, homogeneous-batch fast path, conservation across grouping.
+mod batch_opt_tests;
+
+// Issue #411: precision-safe fractional withdrawal arithmetic — split
+// conservation, proportional_withdraw, withdraw_with_reserve, batch split.
+mod withdrawal_math_tests;
+
+// Issue #415: Strict invariant assertions to protect against re-entrancy and
+// state desync in the stream cancellation/settlement window.
+mod invariant_assertions;
+
+// Issue #414: Byzantine fault tolerance scenarios under simulated ledger
+// discontinuities, clock drift, concurrent state conflicts, and partial
+// batch failures.
+mod byzantine_fault_tolerance;
+
+// Issue #412: Granular role-based authorization — exhaustive negative-path
+// matrix for every mutating entry point against every unauthorized caller.
+mod role_based_authorization;
+
+// Issue #410: Fuzzing coverage for cliff edge-case timestamps near the u64
+// maximum boundary, using both explicit probes and proptest-driven fuzzing.
+mod cliff_fuzz_u64_boundary;
+
+// Issue #402: edge-case precision loss in cliff-vesting during fractional
+// stream withdrawal calculations.  Conservation and zero-dust properties
+// verified with both unit tests and proptest sweeps.
+mod cliff_precision;
+
+// Issue #405: Byzantine fault tolerance scenarios for cliff-vesting under
+// simulated network partitions — stale reads, replayed transactions,
+// competing callers, interleaved clock jumps, and adversarial parameter
+// combinations.
+mod cliff_byzantine_fault_tolerance;
+
+// Issue #406: strict invariant assertions (I1–I6) for cliff-vesting to
+// protect against re-entrancy and state desync — bounds, conservation,
+// pause coherence, zero-dust at settlement, and state-machine guard tests.
+mod cliff_invariant_assertions;
+
+// Issue #401: fuzzing coverage for edge-case timestamps in the pause-clock
+// near u64 maximum boundary limits — stream_time saturation, paused_at at
+// MAX, paused_total overflow, and proptest sweeps over the full u64 range.
+mod pause_clock_fuzz;

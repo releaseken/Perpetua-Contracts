@@ -63,6 +63,18 @@ mod events;
 mod storage;
 mod types;
 
+// --- Issue #407: modular cliff-vesting error taxonomy and messages ---
+pub mod cliff_error;
+
+// --- Issue #408: automated cliff-phase TTL extension ---
+pub mod cliff_ttl;
+
+// --- Issue #409: batch cross-contract invocation optimisation ---
+pub mod batch_opt;
+
+// --- Issue #411: precision-safe fractional withdrawal arithmetic ---
+pub mod withdrawal_math;
+
 pub use accrual::{
     cliff_reached, duration, elapsed, liability, refundable, stream_time, vested, withdrawable,
 };
@@ -311,6 +323,11 @@ impl FluxoraStream {
         )?;
 
         storage::save_stream(&env, stream_id, &stream);
+        // Issue #408: upgrade the TTL to cover the full cliff-wait period so a
+        // stream with a distant cliff does not archive before the cliff opens.
+        // `ensure_cliff_phase_ttl` is a no-op when the cliff-aware target equals
+        // the generic schedule-based one (i.e. for no-cliff or short-cliff streams).
+        cliff_ttl::ensure_cliff_phase_ttl(&env, stream_id, &stream);
         Self::bump_instance_ttl(&env);
 
         events::stream_created(&env, stream_id, &stream);
@@ -1308,6 +1325,30 @@ impl FluxoraStream {
 
         events::ttl_extended(&env, stream_id, target);
         Ok(target)
+    }
+
+    /// Extend the TTL of a cliff-vesting stream to cover the full cliff-wait
+    /// period. **Permissionless** — any actor (keeper, recipient, third party)
+    /// may call this.
+    ///
+    /// # When to use this vs. [`extend_stream_ttl`]
+    ///
+    /// For streams that have not yet reached their cliff, this entry point
+    /// computes a cliff-aware TTL target that guarantees the entry stays readable
+    /// through the cliff instant, even if the cliff is farther away than
+    /// `max_entry_ttl` from the current ledger.
+    ///
+    /// For streams past the cliff, this is equivalent to `extend_stream_ttl`.
+    ///
+    /// # Returns
+    ///
+    /// The TTL the entry has been extended to, in ledgers.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::StreamNotFound`] — no stream with this id.
+    pub fn extend_cliff_stream_ttl(env: Env, stream_id: u64) -> Result<u32, Error> {
+        cliff_ttl::extend_cliff_stream_ttl(&env, stream_id)
     }
 
     /// Extend several streams' TTLs in one transaction. Permissionless.
