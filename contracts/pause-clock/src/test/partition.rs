@@ -61,3 +61,15 @@ fn batch_settle_retried_after_timeout_leaves_the_same_totals() {
     assert_eq!(h.client.get_stream_total(&1), 10);
     assert_eq!(h.client.get_stream_total(&2), 20);
 }
+
+#[test]
+fn batch_settle_with_a_duplicate_id_writes_nothing() {
+    let h = Harness::new();
+    let ids = Vec::from_slice(&h.env, &[1_u64, 2, 1]);
+    let totals = Vec::from_slice(&h.env, &[10_u64, 20, 30]);
+
+    let result = h.client.try_batch_settle(&h.stream_contract, &ids, &totals);
+    assert_eq!(result, Err(Ok(crate::Error::DuplicateStreamId)));
+    assert_eq!(h.client.get_stream_total(&1), 0);
+    assert_eq!(h.client.get_stream_total(&2), 0);
+}

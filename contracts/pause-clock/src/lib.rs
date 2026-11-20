@@ -125,9 +125,9 @@ impl PauseClock {
 
     /// Record that the global stream clock has been paused.
     ///
-    /// Only the registered stream contract may call this.  The call is a no-op
-    /// if the clock is already paused (idempotent, no error) so that an
-    /// in-flight retry after a ledger timeout does not revert.
+    /// Only the registered stream contract may call this. A call while the
+    /// clock is already paused returns [`Error::AlreadyPaused`] and changes
+    /// nothing, so a retry after a lost response cannot start a second cycle.
     ///
     /// # Errors
     ///
@@ -179,7 +179,8 @@ impl PauseClock {
         }
 
         let now = env.ledger().timestamp();
-        let paused_at = config.paused_at.unwrap_or(now);
+        // A paused clock always records its start time; a missing one is corrupt state.
+        let paused_at = config.paused_at.ok_or(Error::NotPaused)?;
         let paused_duration = now.saturating_sub(paused_at);
         config.paused_total = config
             .paused_total
@@ -271,6 +272,16 @@ impl PauseClock {
         // Parallel vecs must have matching length.
         if totals.len() != n {
             return Err(Error::Overflow);
+        }
+
+        // Reject duplicate IDs before any write so a bad batch leaves no partial state.
+        for i in 0..n {
+            let id = stream_ids.get_unchecked(i);
+            for j in (i + 1)..n {
+                if stream_ids.get_unchecked(j) == id {
+                    return Err(Error::DuplicateStreamId);
+                }
+            }
         }
 
         // Tight loop: one persistent write per stream, no additional
