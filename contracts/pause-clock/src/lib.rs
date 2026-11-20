@@ -500,11 +500,19 @@ impl PauseClock {
 
     /// Update the stream contract address this clock trusts.
     ///
+    /// Admin-only. The zero address and the contract itself are rejected, the
+    /// same way `set_admin` rejects them.
+    ///
     /// # Errors
     ///
     /// * [`Error::Unauthorized`]
+    /// * [`Error::InvalidStreamContract`]: `stream_contract` is the zero address
+    ///   or the contract itself.
     pub fn set_stream_contract(env: Env, stream_contract: Address) -> Result<(), Error> {
         let mut config = Self::require_admin(&env)?;
+        if storage::is_forbidden_admin(&env, &stream_contract) {
+            return Err(Error::InvalidStreamContract);
+        }
         config.stream_contract = stream_contract;
         storage::save_config(&env, &config);
         Ok(())

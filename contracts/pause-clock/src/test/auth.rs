@@ -96,3 +96,27 @@ fn set_stream_contract_accepts_admin() {
     let config = h.client.get_config().unwrap();
     assert_eq!(config.stream_contract, new_sc);
 }
+
+// ---------------------------------------------------------------------------
+// set_stream_contract (#394)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_stream_contract_rejects_the_contract_itself() {
+    let h = Harness::new();
+    let result = h.client.try_set_stream_contract(&h.contract_id);
+    assert_eq!(result, Err(Ok(crate::Error::InvalidStreamContract)));
+}
+
+#[test]
+fn set_stream_contract_rejects_the_zero_address() {
+    use soroban_sdk::String;
+
+    let h = Harness::new();
+    let zero = soroban_sdk::Address::from_string(&String::from_str(
+        &h.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
+    let result = h.client.try_set_stream_contract(&zero);
+    assert_eq!(result, Err(Ok(crate::Error::InvalidStreamContract)));
+}

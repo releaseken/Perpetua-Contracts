@@ -48,4 +48,8 @@ pub enum Error {
     BatchTooLarge = 12,
     /// Batch contained a duplicate stream ID.
     DuplicateStreamId = 13,
+    // --- Configuration ---
+    /// The stream contract address is the zero address or the contract itself;
+    /// installing either would route every stream-only call to an unusable caller.
+    InvalidStreamContract = 14,
 }
