@@ -528,4 +528,5 @@ mod test {
     mod batch;
     mod auth;
     mod admin_rotation;
+    mod partition;
 }
