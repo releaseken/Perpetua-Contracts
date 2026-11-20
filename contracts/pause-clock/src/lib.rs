@@ -275,9 +275,7 @@ impl PauseClock {
 
         // Tight loop: one persistent write per stream, no additional
         // cross-contract calls.  All TTL bumps happen inside save_stream_total.
-        for i in 0..n {
-            let stream_id = stream_ids.get_unchecked(i);
-            let total = totals.get_unchecked(i);
+        for (stream_id, total) in stream_ids.iter().zip(totals.iter()) {
             storage::save_stream_total(&env, stream_id, total);
             events::stream_pause_totaled(&env, stream_id, total);
         }
