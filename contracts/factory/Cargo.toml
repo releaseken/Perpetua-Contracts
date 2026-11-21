@@ -36,6 +36,7 @@ soroban-sdk = "27.0.5"
 [dev-dependencies]
 fluxora-stream = { path = "../stream" }
 soroban-sdk = { version = "27.0.5", features = ["testutils"] }
+proptest = "1"
 
 [profile.release]
 opt-level = "z"

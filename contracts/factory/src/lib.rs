@@ -27,10 +27,15 @@
 //! previous admin. The zero address and the factory's own address are rejected
 //! outright as admin candidates in both the single-step and two-step paths.
 
+pub mod invariants;
+
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
     Bytes, BytesN, Env, IntoVal, String, Symbol,
 };
+
+pub mod math;
+pub use math::{calculate_bps_payout, calculate_fractional_payout, FractionalSplit};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -65,6 +70,8 @@ pub enum DataKey {
     TokenAllowlist(Address),
     /// Per-sender rolling creation bucket.
     RateLimit(Address),
+    /// Re-entrancy guard flag: set while state-modifying external operations are active.
+    Executing,
 }
 
 /// The full on-chain configuration record.
@@ -181,6 +188,10 @@ pub enum FactoryError {
     RateAboveMaximum = 17,
     InvalidDeposit = 18,
     InvalidCliff = 19,
+    /// A re-entrant call was detected; the factory is already executing a state-modifying call.
+    ReentrancyGuard = 20,
+    /// A post-condition invariant check failed after a state mutation.
+    InvariantViolation = 21,
 }
 
 pub trait FactoryGovernance {
@@ -247,6 +258,21 @@ fn bump_ttl(env: &Env) {
 
 fn bump_instance(env: &Env) {
     bump_ttl(env);
+}
+
+fn is_executing(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Executing)
+        .unwrap_or(false)
+}
+
+fn set_executing(env: &Env) {
+    env.storage().instance().set(&DataKey::Executing, &true);
+}
+
+fn clear_executing(env: &Env) {
+    env.storage().instance().remove(&DataKey::Executing);
 }
 
 /// Returns the stored config or `NotInitialized`.
@@ -777,6 +803,9 @@ impl FluxoraFactory {
     /// Update the maximum number of active streams admitted through the factory.
     pub fn set_max_active_streams(env: Env, max_active_streams: u32) -> Result<(), FactoryError> {
         let mut config = Self::guard(&env)?;
+        if max_active_streams < config.active_streams {
+            return Err(FactoryError::CapacityCapExceeded);
+        }
         config.max_active_streams = max_active_streams;
         env.storage().instance().set(&DataKey::Config, &config);
         bump_ttl(&env);
@@ -890,7 +919,17 @@ impl FluxoraFactory {
         if config.active_streams == 0 {
             return Err(FactoryError::ActiveStreamCountUnderflow);
         }
-        config.active_streams -= 1;
+        let initial_active = config.active_streams;
+        config.active_streams = config
+            .active_streams
+            .checked_sub(1)
+            .ok_or(FactoryError::ActiveStreamCountUnderflow)?;
+
+        // Invariant assertion: active_streams must decrement by exactly 1.
+        if config.active_streams != initial_active.saturating_sub(1) {
+            return Err(FactoryError::InvariantViolation);
+        }
+
         env.storage().instance().set(&DataKey::Config, &config);
         bump_ttl(&env);
         Ok(())
