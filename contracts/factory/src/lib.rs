@@ -30,8 +30,8 @@
 pub mod invariants;
 
 use soroban_sdk::{
-    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Bytes, BytesN, Env, IntoVal, String, Symbol,
+    contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
 };
 
 pub mod math;
@@ -254,10 +254,6 @@ fn bump_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-}
-
-fn bump_instance(env: &Env) {
-    bump_ttl(env);
 }
 
 fn is_executing(env: &Env) -> bool {
@@ -833,6 +829,9 @@ impl FluxoraFactory {
         transferable: bool,
     ) -> Result<u64, FactoryError> {
         let mut config = load_config(&env)?;
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         if config.creation_paused {
             return Err(FactoryError::CreationPaused);
         }
@@ -882,6 +881,8 @@ impl FluxoraFactory {
             record_creation_with_config(&env, &sender, &config)?;
         }
 
+        let initial_active = config.active_streams;
+        set_executing(&env);
         let stream_id = env.invoke_contract::<u64>(
             &config.stream_contract,
             &Symbol::new(&env, "create_stream"),
@@ -899,13 +900,59 @@ impl FluxoraFactory {
             )
                 .into_val(&env),
         );
+        clear_executing(&env);
 
         config.active_streams = config
             .active_streams
             .checked_add(1)
             .ok_or(FactoryError::CapacityCapExceeded)?;
+        if config.active_streams != initial_active.saturating_add(1) {
+            return Err(FactoryError::InvariantViolation);
+        }
         env.storage().instance().set(&DataKey::Config, &config);
         Ok(stream_id)
+    }
+
+    /// Streamline cross-contract invocation overhead during high-frequency batch claims.
+    ///
+    /// Caches the factory configuration and stream contract address once for the entire
+    /// batch, enforces the re-entrancy execution lock across the batch dispatch, and
+    /// accumulates claimed amounts using checked arithmetic to prevent overflow.
+    pub fn batch_claim(env: Env, stream_ids: Vec<u64>) -> Result<i128, FactoryError> {
+        let config = load_config(&env)?;
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
+        if stream_ids.is_empty() {
+            return Ok(0);
+        }
+
+        set_executing(&env);
+        let claim_sym = symbol_short!("withdraw");
+        let stream_contract = &config.stream_contract;
+        let mut total_claimed: i128 = 0;
+
+        for stream_id in stream_ids.iter() {
+            let claimed = env.invoke_contract::<i128>(
+                stream_contract,
+                &claim_sym,
+                (stream_id,).into_val(&env),
+            );
+            if claimed < 0 {
+                clear_executing(&env);
+                return Err(FactoryError::InvariantViolation);
+            }
+            total_claimed = match total_claimed.checked_add(claimed) {
+                Some(sum) => sum,
+                None => {
+                    clear_executing(&env);
+                    return Err(FactoryError::CapacityCapExceeded);
+                }
+            };
+        }
+
+        clear_executing(&env);
+        Ok(total_claimed)
     }
 
     /// Release one active slot after a stream reaches a terminal state.
@@ -914,6 +961,9 @@ impl FluxoraFactory {
     /// contract integration should invoke it exactly once for cancellation or
     /// depletion. Calls made when the active count is already zero are rejected.
     pub fn stream_terminated(env: Env, _stream_id: u64) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let mut config = load_config(&env)?;
         config.stream_contract.require_auth();
         if config.active_streams == 0 {
@@ -927,6 +977,32 @@ impl FluxoraFactory {
 
         // Invariant assertion: active_streams must decrement by exactly 1.
         if config.active_streams != initial_active.saturating_sub(1) {
+            return Err(FactoryError::InvariantViolation);
+        }
+
+        env.storage().instance().set(&DataKey::Config, &config);
+        bump_ttl(&env);
+        Ok(())
+    }
+
+    /// Release multiple active slots in a single instance storage read/write cycle
+    /// during high-frequency batch claims that deplete multiple streams.
+    pub fn batch_streams_terminated(env: Env, count: u32) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
+        let mut config = load_config(&env)?;
+        config.stream_contract.require_auth();
+        if count == 0 {
+            return Ok(());
+        }
+        let initial_active = config.active_streams;
+        config.active_streams = config
+            .active_streams
+            .checked_sub(count)
+            .ok_or(FactoryError::ActiveStreamCountUnderflow)?;
+
+        if config.active_streams != initial_active.saturating_sub(count) {
             return Err(FactoryError::InvariantViolation);
         }
 
