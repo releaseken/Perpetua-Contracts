@@ -37,6 +37,11 @@ compile_error!("stream-NFT production WASM must be built for wasm32v1-none.");
 #[cfg(test)]
 extern crate std;
 
+pub mod math;
+
+#[cfg(test)]
+pub mod test;
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, Address, Env, IntoVal, String, Symbol,
     Val,
@@ -72,12 +77,14 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    AlreadyInitialized,
-    NotInitialized,
-    AlreadyMinted,
-    TokenNotFound,
-    NotOwner,
-    StreamRejected,
+    AlreadyInitialized = 0,
+    NotInitialized = 1,
+    AlreadyMinted = 2,
+    TokenNotFound = 3,
+    NotOwner = 4,
+    StreamRejected = 5,
+    Overflow = 6,
+    ArithmeticOverflow = 7,
 }
 
 const STREAM_TRANSFER_RECIPIENT: &str = "transfer_recipient";
@@ -194,24 +201,30 @@ impl StreamNft {
             panic_with_error!(&env, Error::AlreadyMinted);
         }
         let supply = env.storage().instance().get(&DataKey::Supply).unwrap_or(0);
-        if supply == u64::MAX {
-            panic_with_error!(&env, Error::TokenNotFound);
-        }
+        let new_supply = match supply.checked_add(1) {
+            Some(s) => s,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Owner(stream_id), &caller);
-        bump(&env, &DataKey::Owner(stream_id));
         let balance: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::Balance(caller.clone()))
             .unwrap_or(0);
+        let new_balance = match balance.checked_add(1) {
+            Some(b) => b,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
+
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(caller.clone()), &(balance + 1));
+            .set(&DataKey::Owner(stream_id), &caller);
+        bump(&env, &DataKey::Owner(stream_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(caller.clone()), &new_balance);
         bump(&env, &DataKey::Balance(caller));
-        env.storage().instance().set(&DataKey::Supply, &(supply + 1));
+        env.storage().instance().set(&DataKey::Supply, &new_supply);
     }
 
     /// Transfer the claim token for `stream_id`, and reassign the underlying
@@ -243,13 +256,15 @@ impl StreamNft {
             .get(&DataKey::Balance(from.clone()))
             .unwrap_or(0);
         if from_balance == 1 {
-            env.storage()
-                .persistent()
-                .remove(&DataKey::Balance(from));
+            env.storage().persistent().remove(&DataKey::Balance(from));
         } else if from_balance > 1 {
+            let new_from_balance = match from_balance.checked_sub(1) {
+                Some(b) => b,
+                None => panic_with_error!(&env, Error::Overflow),
+            };
             env.storage()
                 .persistent()
-                .set(&DataKey::Balance(from.clone()), &(from_balance - 1));
+                .set(&DataKey::Balance(from.clone()), &new_from_balance);
             bump(&env, &DataKey::Balance(from));
         }
         let to_balance: u32 = env
@@ -257,9 +272,13 @@ impl StreamNft {
             .persistent()
             .get(&DataKey::Balance(to.clone()))
             .unwrap_or(0);
+        let new_to_balance = match to_balance.checked_add(1) {
+            Some(b) => b,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &(to_balance + 1));
+            .set(&DataKey::Balance(to.clone()), &new_to_balance);
         bump(&env, &DataKey::Balance(to));
     }
 }
