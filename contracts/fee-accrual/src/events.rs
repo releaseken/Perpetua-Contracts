@@ -110,12 +110,7 @@ pub fn emit_config_updated(
     env.events().publish(topics, event);
 }
 
-pub fn emit_role_updated(
-    env: &Env,
-    role: Symbol,
-    old_holder: &Address,
-    new_holder: &Address,
-) {
+pub fn emit_role_updated(env: &Env, role: Symbol, old_holder: &Address, new_holder: &Address) {
     let topics = (Symbol::new(env, "role_updated"), role);
     let event = RoleUpdatedEvent {
         role,
