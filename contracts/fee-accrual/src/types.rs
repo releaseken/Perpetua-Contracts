@@ -14,6 +14,11 @@ pub enum DataKey {
     TotalProtocolFees,
     /// Instance storage: total cumulative keeper fees accrued.
     TotalKeeperFees,
+    /// Instance storage: re-entrancy guard flag (issue #388).
+    /// Set to `true` while a state-modifying fee operation is executing, cleared on exit.
+    /// A re-entrant invocation that finds this flag set returns [`FeeError::ReentrancyGuard`]
+    /// immediately before reading or modifying state.
+    Executing,
 }
 
 /// Global fee and role configuration.

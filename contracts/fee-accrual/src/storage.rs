@@ -105,3 +105,20 @@ pub fn is_zero_address(env: &Env, addr: &Address) -> bool {
 pub fn is_forbidden_admin(env: &Env, addr: &Address) -> bool {
     is_zero_address(env, addr) || *addr == env.current_contract_address()
 }
+
+pub fn is_executing(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get::<_, bool>(&DataKey::Executing)
+        .unwrap_or(false)
+}
+
+pub fn set_executing(env: &Env) {
+    env.storage().instance().set(&DataKey::Executing, &true);
+    extend_instance(env);
+}
+
+pub fn clear_executing(env: &Env) {
+    env.storage().instance().remove(&DataKey::Executing);
+    extend_instance(env);
+}

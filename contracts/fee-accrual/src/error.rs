@@ -89,6 +89,8 @@ pub enum FeeError {
     ContractPaused = 21,
     /// Contract is already unpaused.
     ContractNotPaused = 22,
+    /// Re-entrancy guard triggered; concurrent or recursive invocation rejected (Issue #388).
+    ReentrancyGuard = 23,
 }
 
 impl FeeError {
@@ -125,6 +127,9 @@ impl FeeError {
             }
             FeeError::ContractPaused => "fee-accrual contract is currently paused",
             FeeError::ContractNotPaused => "fee-accrual contract is not paused",
+            FeeError::ReentrancyGuard => {
+                "re-entrancy guard triggered; concurrent or recursive invocation rejected"
+            }
         }
     }
 
@@ -151,7 +156,8 @@ impl FeeError {
             FeeError::ArithmeticOverflow
             | FeeError::EmptyBatch
             | FeeError::BatchTooLarge
-            | FeeError::InvariantViolation => 'E',
+            | FeeError::InvariantViolation
+            | FeeError::ReentrancyGuard => 'E',
         }
     }
 }
