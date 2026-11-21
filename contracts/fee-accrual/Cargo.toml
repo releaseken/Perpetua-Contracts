@@ -1,0 +1,54 @@
+# Perpetua fee-accrual contract — standalone Cargo project.
+#
+# Dedicated fee-accrual subsystem for protocol and keeper fee accounting in Perpetua.
+# Tracks protocol fee accrual, keeper fee splits, and fee distribution balances
+# with defensive checked arithmetic, modularized error types, and custom error messages
+# for enhanced client observability.
+#
+# Issue #389: modularize error types and custom error messages in fee-accrual for enhanced
+# client observability.
+#
+#   cargo build  --target wasm32v1-none --release
+#   cargo test
+
+[workspace]
+resolver = "2"
+members = ["."]
+
+[package]
+name = "perpetua-fee-accrual"
+description = "Dedicated fee accrual and keeper split accounting subsystem for Perpetua"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.97.1"
+license = "Apache-2.0"
+repository = "https://github.com/releaseken/Perpetua-Contracts"
+publish = false
+
+[lib]
+crate-type = ["lib", "cdylib"]
+doctest = false
+
+[features]
+testutils = ["soroban-sdk/testutils"]
+
+[dependencies]
+soroban-sdk = "27.0.6"
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = 0
+debug-assertions = false
+overflow-checks = true
+incremental = false
+
+[profile.release-with-logs]
+inherits = "release"
+debug-assertions = true
