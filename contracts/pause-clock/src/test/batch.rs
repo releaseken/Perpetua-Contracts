@@ -128,8 +128,48 @@ fn batch_get_totals_oversized_returns_error() {
 }
 
 // ---------------------------------------------------------------------------
-// batch_settle only allows the stream contract to call it
+// LengthMismatch error is distinct from Overflow (issue #398)
 // ---------------------------------------------------------------------------
+
+/// `batch_settle` with mismatched vec lengths must return `LengthMismatch`,
+/// not `Overflow`. This verifies that the dedicated error variant is used so
+/// clients can tell a data-shape error apart from an arithmetic overflow.
+#[test]
+fn batch_settle_mismatched_lengths_returns_length_mismatch() {
+    use crate::Error;
+    let h = Harness::new();
+    let ids = Vec::from_slice(&h.env, &[1_u64, 2]);
+    let tots = Vec::from_slice(&h.env, &[10_u64]); // one item short
+    let err = h
+        .client
+        .try_batch_settle(&h.stream_contract, &ids, &tots)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        Error::LengthMismatch,
+        "mismatched lengths must return LengthMismatch, not Overflow"
+    );
+}
+
+/// `batch_settle` with more totals than ids also returns `LengthMismatch`.
+#[test]
+fn batch_settle_more_totals_than_ids_returns_length_mismatch() {
+    use crate::Error;
+    let h = Harness::new();
+    let ids = Vec::from_slice(&h.env, &[1_u64]);
+    let tots = Vec::from_slice(&h.env, &[10_u64, 20]); // one item extra
+    let err = h
+        .client
+        .try_batch_settle(&h.stream_contract, &ids, &tots)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(
+        err,
+        Error::LengthMismatch,
+        "extra totals must return LengthMismatch, not Overflow"
+    );
+}
 
 #[test]
 fn batch_settle_rejects_non_stream_caller() {

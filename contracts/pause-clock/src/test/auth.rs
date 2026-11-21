@@ -34,7 +34,10 @@ fn record_pause_then_resume_cycle() {
 
     let config = h.client.get_config().unwrap();
     assert!(!config.paused, "clock must not be paused after resume");
-    assert!(config.paused_total >= 600, "paused_total must include the interval");
+    assert!(
+        config.paused_total >= 600,
+        "paused_total must include the interval"
+    );
     assert_eq!(config.cycle_count, 1);
 }
 
@@ -50,7 +53,10 @@ fn double_pause_returns_already_paused() {
 fn resume_without_pause_returns_not_paused() {
     let h = Harness::new();
     let result = h.client.try_record_resume(&h.stream_contract);
-    assert!(result.is_err(), "resume without pause must return NotPaused");
+    assert!(
+        result.is_err(),
+        "resume without pause must return NotPaused"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -79,11 +85,9 @@ fn settle_stream_total_accepts_stream_contract() {
 #[test]
 fn set_stream_contract_rejects_non_admin() {
     let h = Harness::new();
-    let result = h
-        .client
-        .try_set_stream_contract(&h.other); // other is not admin
-    // mock_all_auths makes the auth succeed, but the contract checks the config.
-    // We test without mock_all_auths to trigger the actual auth rejection.
+    let result = h.client.try_set_stream_contract(&h.other); // other is not admin
+                                                             // mock_all_auths makes the auth succeed, but the contract checks the config.
+                                                             // We test without mock_all_auths to trigger the actual auth rejection.
     let _ = result;
     // The intent is verified in admin_rotation tests with mock-free envs.
 }
@@ -98,25 +102,29 @@ fn set_stream_contract_accepts_admin() {
 }
 
 // ---------------------------------------------------------------------------
-// set_stream_contract (#394)
+// set_stream_contract address validation (#394/#398)
 // ---------------------------------------------------------------------------
 
 #[test]
 fn set_stream_contract_rejects_the_contract_itself() {
     let h = Harness::new();
-    let result = h.client.try_set_stream_contract(&h.contract_id);
-    assert_eq!(result, Err(Ok(crate::Error::InvalidStreamContract)));
+    let err = h
+        .client
+        .try_set_stream_contract(&h.contract_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, crate::Error::InvalidStreamContract);
 }
 
 #[test]
-fn set_stream_contract_rejects_the_zero_address() {
+fn set_stream_contract_rejects_zero_address() {
     use soroban_sdk::String;
-
     let h = Harness::new();
     let zero = soroban_sdk::Address::from_string(&String::from_str(
         &h.env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     ));
-    let result = h.client.try_set_stream_contract(&zero);
-    assert_eq!(result, Err(Ok(crate::Error::InvalidStreamContract)));
+    let err = h.client.try_set_stream_contract(&zero).unwrap_err().unwrap();
+    assert_eq!(err, crate::Error::InvalidStreamContract);
+}
 }

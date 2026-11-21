@@ -57,6 +57,13 @@ use std::println;
 /// the queue so successive calls return only the new events.
 ///
 /// The returned vec is ordered by emission order.
+///
+/// # Instruction budget
+///
+/// Each `push_back` on a Soroban `Vec` is a separate host invocation. Building
+/// the topics vector with a single `Vec::from_slice` call instead of N
+/// `push_back` calls reduces the host-instruction count from O(N topics) to
+/// O(1) per event.
 fn drain_events(h: &Harness) -> std::vec::Vec<(soroban_sdk::Vec<Val>, Val)> {
     let raw = h
         .env
@@ -69,11 +76,15 @@ fn drain_events(h: &Harness) -> std::vec::Vec<(soroban_sdk::Vec<Val>, Val)> {
     raw.into_iter()
         .map(|event| {
             let soroban_sdk::xdr::ContractEventBody::V0(body) = event.body;
-            let mut topics = soroban_sdk::vec![&h.env];
-            for t in body.topics.iter() {
-                topics.push_back(soroban_sdk::Val::try_from_val(&h.env, t).unwrap());
-            }
-            let data: Val = soroban_sdk::Val::try_from_val(&h.env, &body.data).unwrap();
+            // Deserialize all topics in one pass into a Rust-side Vec<Val>,
+            // then construct the Soroban Vec with a single host call.
+            let topic_vals: std::vec::Vec<Val> = body
+                .topics
+                .iter()
+                .map(|t| Val::try_from_val(&h.env, t).unwrap())
+                .collect();
+            let topics = soroban_sdk::Vec::from_slice(&h.env, &topic_vals);
+            let data: Val = Val::try_from_val(&h.env, &body.data).unwrap();
             (topics, data)
         })
         .collect()
@@ -348,16 +359,22 @@ fn test_golden_events() {
     // 8. TTL Extended
     harness.client.extend_stream_ttl(&stream_id);
     push_events();
-    let mut events = std::vec::Vec::new();
-    for event in raw_events {
-        let soroban_sdk::xdr::ContractEventBody::V0(body) = event.body;
-        let mut topics = soroban_sdk::vec![&env];
-        for t in body.topics.iter() {
-            topics.push_back(soroban_sdk::Val::try_from_val(env, t).unwrap());
-        }
-        let data: Val = soroban_sdk::Val::try_from_val(env, &body.data).unwrap();
-        events.push((topics, data));
-    }
+    // Deserialize each event's topics in a single `Vec::from_slice` call rather
+    // than N `push_back` calls, minimizing Soroban host instructions per event.
+    let events: std::vec::Vec<(soroban_sdk::Vec<Val>, Val)> = raw_events
+        .into_iter()
+        .map(|event| {
+            let soroban_sdk::xdr::ContractEventBody::V0(body) = event.body;
+            let topic_vals: std::vec::Vec<Val> = body
+                .topics
+                .iter()
+                .map(|t| Val::try_from_val(env, t).unwrap())
+                .collect();
+            let topics = soroban_sdk::Vec::from_slice(env, &topic_vals);
+            let data: Val = Val::try_from_val(env, &body.data).unwrap();
+            (topics, data)
+        })
+        .collect();
 
     // We expect exactly 8 events
     assert_eq!(
@@ -533,11 +550,14 @@ fn test_delegate_events() {
         .into_iter()
         .filter_map(|event| {
             let soroban_sdk::xdr::ContractEventBody::V0(body) = event.body;
-            let mut topics = soroban_sdk::vec![&env];
-            for t in body.topics.iter() {
-                topics.push_back(soroban_sdk::Val::try_from_val(env, t).unwrap());
-            }
-            let data: Val = soroban_sdk::Val::try_from_val(env, &body.data).unwrap();
+            // Deserialize topics in one host call rather than N push_back calls.
+            let topic_vals: std::vec::Vec<Val> = body
+                .topics
+                .iter()
+                .map(|t| Val::try_from_val(env, t).ok())
+                .collect::<Option<_>>()?;
+            let topics = soroban_sdk::Vec::from_slice(env, &topic_vals);
+            let data: Val = Val::try_from_val(env, &body.data).unwrap();
             // Only keep events whose topic[0] is "delegate_granted"
             let sym: Symbol = topics.get(0)?.try_into_val(env).ok()?;
             if sym == Symbol::new(env, "delegate_granted") {
@@ -599,11 +619,14 @@ fn test_delegate_events() {
         .into_iter()
         .filter_map(|event| {
             let soroban_sdk::xdr::ContractEventBody::V0(body) = event.body;
-            let mut topics = soroban_sdk::vec![&env];
-            for t in body.topics.iter() {
-                topics.push_back(soroban_sdk::Val::try_from_val(env, t).unwrap());
-            }
-            let data: Val = soroban_sdk::Val::try_from_val(env, &body.data).unwrap();
+            // Deserialize topics in one host call rather than N push_back calls.
+            let topic_vals: std::vec::Vec<Val> = body
+                .topics
+                .iter()
+                .map(|t| Val::try_from_val(env, t).ok())
+                .collect::<Option<_>>()?;
+            let topics = soroban_sdk::Vec::from_slice(env, &topic_vals);
+            let data: Val = Val::try_from_val(env, &body.data).unwrap();
             let sym: Symbol = topics.get(0)?.try_into_val(env).ok()?;
             if sym == Symbol::new(env, "delegate_revoked") {
                 Some((topics, data))

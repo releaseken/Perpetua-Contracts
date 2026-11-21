@@ -77,7 +77,10 @@ fn batch_extend_ttl_skips_unknown_ids() {
     // ID 99 is unknown — should be silently skipped.
     let ids = soroban_sdk::Vec::from_slice(&h.env, &[1_u64, 2_u64, 99_u64]);
     let extended = h.client.batch_extend_ttl(&ids);
-    assert_eq!(extended, 2, "only the two existing entries must be extended");
+    assert_eq!(
+        extended, 2,
+        "only the two existing entries must be extended"
+    );
 }
 
 #[test]
@@ -113,9 +116,9 @@ fn instance_ttl_bumped_on_every_mutation() {
     let max_ttl = h.max_achievable_ttl();
 
     // After init the instance TTL must already be at max.
-    let instance_ttl_after_init = h.env.as_contract(&h.contract_id, || {
-        h.env.storage().instance().get_ttl()
-    });
+    let instance_ttl_after_init = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
     assert_eq!(
         instance_ttl_after_init, max_ttl,
         "instance TTL must be max after init"
@@ -124,9 +127,9 @@ fn instance_ttl_bumped_on_every_mutation() {
     // After settle the instance TTL must still be at max.
     h.client
         .settle_stream_total(&h.stream_contract, &5_u64, &0_u64);
-    let instance_ttl_after_settle = h.env.as_contract(&h.contract_id, || {
-        h.env.storage().instance().get_ttl()
-    });
+    let instance_ttl_after_settle = h
+        .env
+        .as_contract(&h.contract_id, || h.env.storage().instance().get_ttl());
     assert_eq!(
         instance_ttl_after_settle, max_ttl,
         "instance TTL must remain max after settle_stream_total"

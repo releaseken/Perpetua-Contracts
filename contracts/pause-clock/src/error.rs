@@ -6,6 +6,27 @@ use soroban_sdk::contracterror;
 ///
 /// Discriminants are part of the public ABI. Never renumber an existing
 /// variant; only append new ones at the end.
+///
+/// # Client observability guide
+///
+/// Clients should match on these variants rather than on numeric codes.
+/// Each section below groups variants by the category of failure so that
+/// a client can present a meaningful message:
+///
+/// * **Initialization** — [`NotInitialized`](Self::NotInitialized),
+///   [`AlreadyInitialized`](Self::AlreadyInitialized)
+/// * **Authorization** — [`Unauthorized`](Self::Unauthorized),
+///   [`CallerNotStreamContract`](Self::CallerNotStreamContract)
+/// * **Admin rotation** — [`InvalidNewAdmin`](Self::InvalidNewAdmin),
+///   [`NoPendingAdmin`](Self::NoPendingAdmin)
+/// * **Clock state** — [`AlreadyPaused`](Self::AlreadyPaused),
+///   [`NotPaused`](Self::NotPaused), [`StreamNotFound`](Self::StreamNotFound)
+/// * **Arithmetic** — [`Overflow`](Self::Overflow)
+/// * **Batch** — [`EmptyBatch`](Self::EmptyBatch),
+///   [`BatchTooLarge`](Self::BatchTooLarge),
+///   [`DuplicateStreamId`](Self::DuplicateStreamId),
+///   [`LengthMismatch`](Self::LengthMismatch),
+///   [`InvalidStreamContract`](Self::InvalidStreamContract)
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -48,8 +69,10 @@ pub enum Error {
     BatchTooLarge = 12,
     /// Batch contained a duplicate stream ID.
     DuplicateStreamId = 13,
-    // --- Configuration ---
+    // --- Configuration / batch ---
     /// The stream contract address is the zero address or the contract itself;
     /// installing either would route every stream-only call to an unusable caller.
-    InvalidStreamContract = 14,
+    InvalidStreamContract = 15,
+    /// The two parallel vectors passed to `batch_settle` have different lengths.
+    LengthMismatch = 14,
 }

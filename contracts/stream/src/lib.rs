@@ -915,6 +915,20 @@ impl FluxoraStream {
         let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
         let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
 
+        // Reject unknown op bits: any bit outside the defined set is undefined
+        // and would silently create an unenforceable grant. Reject early so
+        // callers learn about the stale bitmask before any auth is required.
+        if ops & !op::ALL != 0 {
+            return Err(Error::Unauthorized);
+        }
+
+        // ops == 0 carries no meaning and skips auth entirely in the original
+        // code path. Treat it as an invalid argument so the caller gets a
+        // deterministic, typed error rather than silent success.
+        if ops == 0 {
+            return Err(Error::InvalidAmount);
+        }
+
         // The grantor must be the party that owns the ops being delegated.
         // Mixed calls are rejected; split into two grants instead.
         let needs_sender = ops & sender_ops != 0;
@@ -938,8 +952,10 @@ impl FluxoraStream {
                 (stream_id, delegate.clone(), ops, expires_at).into_val(&env),
             );
         } else {
-            // ops == 0 is a no-op; treat it as success.
-            return Ok(());
+            // Unreachable: ops == 0 is rejected above, unknown bits are
+            // rejected above, and mixed grants are rejected above.
+            // The else arm is kept as an unreachable defence in depth.
+            return Err(Error::Unauthorized);
         }
 
         let grant = DelegateGrant { ops, expires_at };

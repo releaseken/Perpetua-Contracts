@@ -51,7 +51,10 @@ fn two_step_rotation_completes() {
 
     // Pending entry must be cleared.
     let pending_after = h.client.pending_admin().unwrap();
-    assert!(pending_after.is_none(), "pending admin must be cleared after accept");
+    assert!(
+        pending_after.is_none(),
+        "pending admin must be cleared after accept"
+    );
 }
 
 #[test]
@@ -64,7 +67,10 @@ fn single_step_clears_pending_proposal() {
     // A single-step rotation supersedes the proposal.
     h.client.set_admin(&replacement);
     let pending = h.client.pending_admin().unwrap();
-    assert!(pending.is_none(), "proposal must be cleared by single-step rotation");
+    assert!(
+        pending.is_none(),
+        "proposal must be cleared by single-step rotation"
+    );
 }
 
 #[test]

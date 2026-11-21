@@ -11,6 +11,17 @@ pub mod op {
     pub const RESUME: u32 = 1 << 3;
     pub const TOP_UP: u32 = 1 << 4;
     pub const TRANSFER_RECIPIENT: u32 = 1 << 5;
+
+    /// Union of every currently-defined op bit.
+    ///
+    /// Used by [`crate::FluxoraStream::grant_delegate`] to reject grants that
+    /// set unknown bits (bits 6–31). Any bit outside this mask is undefined and
+    /// would silently create a grant with no enforcement meaning; rejecting such
+    /// grants now prevents surprise when new bits are assigned in the future.
+    ///
+    /// **Versioning rule:** when a new op constant is added above, `ALL` must be
+    /// updated in the same commit to include it.
+    pub const ALL: u32 = WITHDRAW | CANCEL | PAUSE | RESUME | TOP_UP | TRANSFER_RECIPIENT;
 }
 
 /// Bitmask constants for the immutable [`Stream`] behavior flags.

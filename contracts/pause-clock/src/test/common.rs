@@ -43,9 +43,7 @@ impl<'a> Harness<'a> {
     /// Advance both clock and sequence consistently.
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
-        self.env
-            .ledger()
-            .set_timestamp(info.timestamp + seconds);
+        self.env.ledger().set_timestamp(info.timestamp + seconds);
         // 5 s / ledger nominal.
         let ledgers = ((seconds + 4) / 5) as u32;
         self.env

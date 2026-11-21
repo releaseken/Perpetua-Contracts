@@ -107,11 +107,7 @@ pub fn peek_stream_total(env: &Env, stream_id: u64) -> u64 {
 /// bumping its TTL.
 pub fn load_stream_total(env: &Env, stream_id: u64) -> u64 {
     let key = DataKey::PausedTotal(stream_id);
-    let total: u64 = env
-        .storage()
-        .persistent()
-        .get(&key)
-        .unwrap_or(0);
+    let total: u64 = env.storage().persistent().get(&key).unwrap_or(0);
     extend_stream_entry(env, stream_id);
     total
 }

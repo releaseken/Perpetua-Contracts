@@ -401,3 +401,105 @@ fn regranting_after_revocation_restores_access() {
     assert_eq!(paid, 100 * ONE);
     h.assert_pool_exact();
 }
+
+// ---------------------------------------------------------------------------
+// Issue #457 — granular role-based authorization: reject zero ops and unknown
+// op bits so every grant call requires auth and carries defined semantics.
+// ---------------------------------------------------------------------------
+
+/// A zero-ops grant carries no meaning and previously returned Ok(()) without
+/// requiring any authorization. It must now be rejected with InvalidAmount.
+#[test]
+fn grant_zero_ops_is_rejected() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let err = h
+        .client
+        .try_grant_delegate(&id, &h.sender, &agent, &0u32, &None)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::InvalidAmount);
+
+    // No grant was written — the stream is untouched.
+    assert_eq!(h.client.get_stream(&id).withdrawn, 0);
+}
+
+/// A bitmask with bits outside the defined op::ALL set must be rejected.
+/// These bits have no current meaning and accepting them would create a grant
+/// with undefined enforcement semantics.
+#[test]
+fn grant_unknown_op_bits_is_rejected() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    // Bit 6 is currently undefined (all defined ops fit in bits 0–5).
+    let unknown_bit: u32 = 1 << 6;
+    let err = h
+        .client
+        .try_grant_delegate(&id, &h.sender, &agent, &(op::CANCEL | unknown_bit), &None)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::Unauthorized);
+}
+
+/// Unknown bits alone (no defined bits) are also rejected.
+#[test]
+fn grant_only_unknown_bits_is_rejected() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let all_unknown: u32 = !crate::op::ALL;
+    let err = h
+        .client
+        .try_grant_delegate(&id, &h.sender, &agent, &all_unknown, &None)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::Unauthorized);
+}
+
+/// A grant with every defined op bit set is mixed (sender + recipient bits)
+/// and must still be rejected with Unauthorized, unchanged from before.
+#[test]
+fn grant_all_defined_ops_is_mixed_and_rejected() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let err = h
+        .client
+        .try_grant_delegate(&id, &h.sender, &agent, &crate::op::ALL, &None)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::Unauthorized);
+}
+
+/// A valid sender-side grant with every sender op bit passes after the new
+/// validation, requiring sender authorization.
+#[test]
+fn grant_all_sender_ops_is_accepted() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let sender_ops = op::CANCEL | op::PAUSE | op::RESUME | op::TOP_UP;
+    // Should not error.
+    h.client
+        .grant_delegate(&id, &h.sender, &agent, &sender_ops, &None);
+}
+
+/// A valid recipient-side grant with every recipient op bit passes.
+#[test]
+fn grant_all_recipient_ops_is_accepted() {
+    let h = Harness::new();
+    let id = h.create_simple(1_000 * ONE, 100 * DAY);
+    let agent = Address::generate(&h.env);
+
+    let recipient_ops = op::WITHDRAW | op::TRANSFER_RECIPIENT;
+    // Should not error.
+    h.client
+        .grant_delegate(&id, &h.recipient, &agent, &recipient_ops, &None);
+}

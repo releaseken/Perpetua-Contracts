@@ -315,6 +315,20 @@ pub fn withdrawn(env: &Env, stream_id: u64, stream: &Stream, amount: i128) {
         return;
     }
     assert!(amount > 0, "withdraw amount must be positive");
+    // Validate invariants before emitting: amount must be positive, cumulative
+    // withdrawn must cover amount and not exceed deposited.
+    debug_assert!(
+        stream.withdrawn >= amount,
+        "event-sink invariant: withdrawn ({}) < amount ({})",
+        stream.withdrawn,
+        amount,
+    );
+    debug_assert!(
+        stream.withdrawn <= stream.deposited,
+        "event-sink invariant: withdrawn ({}) > deposited ({})",
+        stream.withdrawn,
+        stream.deposited,
+    );
     Withdrawn {
         stream_id,
         recipient: stream.recipient.clone(),
@@ -442,7 +456,10 @@ pub fn delegate_revoked(env: &Env, stream_id: u64, grantor: &Address, delegate: 
 /// cumulative `withdrawn` stays within `deposited` and covers `amount`.
 /// Rejects degenerate state with a deterministic error, never wraps.
 #[allow(dead_code)]
-pub fn check_withdrawn_invariants(stream: &Stream, amount: i128) -> Result<(), crate::error::Error> {
+pub fn check_withdrawn_invariants(
+    stream: &Stream,
+    amount: i128,
+) -> Result<(), crate::error::Error> {
     use crate::error::Error;
     if amount <= 0 {
         return Err(Error::InvalidAmount);

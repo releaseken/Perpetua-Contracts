@@ -137,3 +137,7 @@ mod cliff_invariant_assertions;
 // near u64 maximum boundary limits — stream_time saturation, paused_at at
 // MAX, paused_total overflow, and proptest sweeps over the full u64 range.
 mod pause_clock_fuzz;
+
+// Issue #458: unit and fuzz tests for event-sink pre-emission invariant guards
+// (check_withdrawn_invariants, check_cancelled_invariants).
+mod event_sink_invariants;
