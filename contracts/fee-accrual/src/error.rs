@@ -89,6 +89,16 @@ pub enum FeeError {
     ContractPaused = 21,
     /// Contract is already unpaused.
     ContractNotPaused = 22,
+
+    // -----------------------------------------------------------------------
+    // Cross-Contract Batch Claims & Coalescing (Issue #391)
+    // -----------------------------------------------------------------------
+    /// Batch contains duplicate stream IDs; rejected to prevent double-counting.
+    DuplicateStreamId = 23,
+    /// Parallel vectors passed to a batch operation have mismatched lengths.
+    LengthMismatch = 24,
+    /// Gross accrual amount must be strictly positive (> 0).
+    InvalidAmount = 25,
 }
 
 impl FeeError {
@@ -125,6 +135,13 @@ impl FeeError {
             }
             FeeError::ContractPaused => "fee-accrual contract is currently paused",
             FeeError::ContractNotPaused => "fee-accrual contract is not paused",
+            FeeError::DuplicateStreamId => {
+                "batch contains duplicate stream IDs; deduplicate before invoking"
+            }
+            FeeError::LengthMismatch => {
+                "parallel batch input vectors must have identical lengths"
+            }
+            FeeError::InvalidAmount => "fee accrual gross amount must be strictly positive",
         }
     }
 
@@ -141,7 +158,8 @@ impl FeeError {
             | FeeError::InvalidFeeRecipient
             | FeeError::InvalidStreamId
             | FeeError::InvalidTokenAddress
-            | FeeError::InvalidRoleAddress => 'C',
+            | FeeError::InvalidRoleAddress
+            | FeeError::InvalidAmount => 'C',
             FeeError::ZeroFeeAccrual
             | FeeError::InsufficientAccruedFees
             | FeeError::FeeRecordNotFound
@@ -151,7 +169,9 @@ impl FeeError {
             FeeError::ArithmeticOverflow
             | FeeError::EmptyBatch
             | FeeError::BatchTooLarge
-            | FeeError::InvariantViolation => 'E',
+            | FeeError::InvariantViolation
+            | FeeError::DuplicateStreamId
+            | FeeError::LengthMismatch => 'E',
         }
     }
 }

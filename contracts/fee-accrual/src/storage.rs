@@ -39,6 +39,34 @@ pub fn get_stream_fee(env: &Env, stream_id: u64) -> Option<StreamFeeRecord> {
     record
 }
 
+/// Read-only peek of a stream fee record without bumping its persistent TTL.
+///
+/// Issue #391: used during batch pre-flight validation and batch read queries
+/// (`batch_get_stream_fees`) so that read-only inspection and multi-pass batch
+/// claims do not emit redundant `extend_ttl` host calls per item.
+pub fn peek_stream_fee(env: &Env, stream_id: u64) -> Option<StreamFeeRecord> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StreamFee(stream_id))
+}
+
+/// Check whether a persistent fee record exists for `stream_id`.
+pub fn stream_fee_exists(env: &Env, stream_id: u64) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::StreamFee(stream_id))
+}
+
+/// Extend the persistent TTL of an existing stream fee record.
+pub fn extend_stream_fee_ttl(env: &Env, stream_id: u64) {
+    let key = DataKey::StreamFee(stream_id);
+    env.storage().persistent().extend_ttl(
+        &key,
+        MIN_TTL_LEDGERS_PERSISTENT,
+        BUMP_LEDGERS_PERSISTENT,
+    );
+}
+
 pub fn set_stream_fee(env: &Env, record: &StreamFeeRecord) {
     let key = DataKey::StreamFee(record.stream_id);
     env.storage().persistent().set(&key, record);
@@ -63,6 +91,15 @@ pub fn set_total_protocol_fees(env: &Env, amount: i128) {
     extend_instance(env);
 }
 
+/// Set total protocol fees in instance storage without triggering an immediate
+/// `extend_instance` call. Used inside coalesced batch writes where
+/// `extend_instance` is invoked once at the end of the batch (Issue #391).
+pub fn set_total_protocol_fees_no_bump(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalProtocolFees, &amount);
+}
+
 pub fn get_total_keeper_fees(env: &Env) -> i128 {
     env.storage()
         .instance()
@@ -75,6 +112,15 @@ pub fn set_total_keeper_fees(env: &Env, amount: i128) {
         .instance()
         .set(&DataKey::TotalKeeperFees, &amount);
     extend_instance(env);
+}
+
+/// Set total keeper fees in instance storage without triggering an immediate
+/// `extend_instance` call. Used inside coalesced batch writes where
+/// `extend_instance` is invoked once at the end of the batch (Issue #391).
+pub fn set_total_keeper_fees_no_bump(env: &Env, amount: i128) {
+    env.storage()
+        .instance()
+        .set(&DataKey::TotalKeeperFees, &amount);
 }
 
 pub fn set_pending_admin(env: &Env, nominee: &Address) {

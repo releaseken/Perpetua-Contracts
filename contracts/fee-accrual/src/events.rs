@@ -57,6 +57,25 @@ pub struct PauseStatusEvent {
     pub caller: Address,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchFeeSettledEvent {
+    pub caller: Address,
+    pub recipient: Address,
+    pub streams_processed: u32,
+    pub total_gross_amount: i128,
+    pub total_protocol_fee: i128,
+    pub total_keeper_fee: i128,
+    pub total_net_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlExtendedEvent {
+    pub stream_id: u64,
+    pub extended_to_ledgers: u32,
+}
+
 pub fn emit_fee_accrued(
     env: &Env,
     stream_id: u64,
@@ -148,6 +167,39 @@ pub fn emit_pause_status(env: &Env, paused: bool, caller: &Address) {
     let event = PauseStatusEvent {
         paused,
         caller: caller.clone(),
+    };
+    env.events().publish(topics, event);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_batch_fee_settled(
+    env: &Env,
+    caller: &Address,
+    recipient: &Address,
+    streams_processed: u32,
+    total_gross_amount: i128,
+    total_protocol_fee: i128,
+    total_keeper_fee: i128,
+    total_net_amount: i128,
+) {
+    let topics = (Symbol::new(env, "batch_fee_settled"), caller, recipient);
+    let event = BatchFeeSettledEvent {
+        caller: caller.clone(),
+        recipient: recipient.clone(),
+        streams_processed,
+        total_gross_amount,
+        total_protocol_fee,
+        total_keeper_fee,
+        total_net_amount,
+    };
+    env.events().publish(topics, event);
+}
+
+pub fn emit_ttl_extended(env: &Env, stream_id: u64, extended_to_ledgers: u32) {
+    let topics = (Symbol::new(env, "fee_ttl_extended"), stream_id);
+    let event = TtlExtendedEvent {
+        stream_id,
+        extended_to_ledgers,
     };
     env.events().publish(topics, event);
 }
