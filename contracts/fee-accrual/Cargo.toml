@@ -7,6 +7,8 @@
 #
 # Issue #385: feat(contracts/fee-accrual): add granular role-based authorization
 # to fee-accrual to prevent unauthorized configuration updates.
+# Issue #392: test(contracts/fee-accrual): add fuzzing coverage for edge-case
+# timestamps in fee-accrual near u64 maximum boundary limits.
 #
 #   cargo build  --target wasm32v1-none --release
 #   cargo test
@@ -37,6 +39,7 @@ soroban-sdk = "27.0.6"
 
 [dev-dependencies]
 soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+proptest = "1"
 
 [profile.release]
 opt-level = "z"
