@@ -23,8 +23,8 @@
 //!   Batch sizes are capped by [`MAX_BATCH_PROBE_SIZE`] to strictly prevent Soroban host CPU
 //!   and memory exhaustion. All counter and arithmetic operations use checked arithmetic.
 
-use crate::{Key, ProbeRecord, MAX_BATCH_PROBE_SIZE};
-use soroban_sdk::{Env, Symbol, Vec};
+use crate::{ProbeRecord, MAX_BATCH_PROBE_SIZE};
+use soroban_sdk::Symbol;
 
 /// Verify that a batch size does not exceed the allowed threshold.
 #[inline(always)]

@@ -35,9 +35,9 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! No auth, no tokens, no value of any kind. It holds a single symbol. If it
-//! archives and is never restored, nothing is lost. Do not build on it, and do
-//! not deploy it to mainnet.
+//! No auth, no tokens, no value of any kind. It holds a single symbol or batch
+//! probe entries. If it archives and is never restored, nothing is lost. Do not
+//! build on it, and do not deploy it to mainnet.
 //!
 //! ## Release isolation (issue #1543)
 //!
@@ -54,14 +54,31 @@
 //!
 //! and for the live-network round trip, `script/archival-canary.sh`.
 
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Env, Symbol};
+pub mod invariants;
+
+#[cfg(test)]
+mod test;
+
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Env, Symbol, Vec};
+
+/// Maximum batch probe size allowed to prevent host metering exhaustion.
+pub const MAX_BATCH_PROBE_SIZE: u32 = 32;
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProbeRecord {
+    pub note: Symbol,
+    pub planted_at: u32,
+}
 
 #[contracttype]
 #[repr(u32)]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Key {
     /// The single persistent entry whose archival we are waiting for.
     Canary = 0,
+    /// Multi-probe partitioned canaries identified by sequence id.
+    Probe(u32) = 1,
 }
 
 #[contracterror]
@@ -70,6 +87,14 @@ pub enum Key {
 pub enum Error {
     /// The canary has never been planted.
     NotPlanted = 1,
+    /// Batch is empty.
+    EmptyBatch = 2,
+    /// Batch size exceeds [`MAX_BATCH_PROBE_SIZE`].
+    BatchTooLarge = 3,
+    /// Entry already planted (write-once invariant).
+    DuplicateEntry = 4,
+    /// Arithmetic overflow in loop counter or calculation.
+    ArithmeticOverflow = 5,
 }
 
 #[contract]
@@ -110,68 +135,83 @@ impl ArchivalProbe {
     pub fn planted(env: Env) -> bool {
         env.storage().persistent().has(&Key::Canary)
     }
-}
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use soroban_sdk::symbol_short;
-
-    #[test]
-    fn plant_and_read_round_trip() {
-        let env = Env::default();
-        let id = env.register(ArchivalProbe, ());
-        let client = ArchivalProbeClient::new(&env, &id);
-
-        assert!(!client.planted());
-        assert_eq!(client.try_read().unwrap_err().unwrap(), Error::NotPlanted);
-
-        client.plant(&symbol_short!("canary"));
-        assert!(client.planted());
-        assert_eq!(client.read(), symbol_short!("canary"));
+    /// Plant a keyed probe entry once under a simulated partition id.
+    /// Idempotent: first-write-wins to prevent reset during retry cascades.
+    pub fn plant_probe(env: Env, id: u32, note: Symbol) {
+        let key = Key::Probe(id);
+        if env.storage().persistent().has(&key) {
+            return;
+        }
+        let record = ProbeRecord {
+            note,
+            planted_at: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &record);
     }
 
-    #[test]
-    fn retry_does_not_replace_note_or_refresh_ttl() {
-        use soroban_sdk::testutils::storage::Persistent as _;
-        use soroban_sdk::testutils::Ledger as _;
-
-        let env = Env::default();
-        let id = env.register(ArchivalProbe, ());
-        let client = ArchivalProbeClient::new(&env, &id);
-
-        client.plant(&symbol_short!("first"));
-        let planted_at = env.ledger().sequence();
-        env.ledger().set_sequence_number(planted_at + 100);
-        let ttl_before_retry =
-            env.as_contract(&id, || env.storage().persistent().get_ttl(&Key::Canary));
-
-        client.plant(&symbol_short!("retry"));
-
-        let ttl_after_retry =
-            env.as_contract(&id, || env.storage().persistent().get_ttl(&Key::Canary));
-        assert_eq!(ttl_after_retry, ttl_before_retry);
-        assert_eq!(client.read(), symbol_short!("first"));
+    /// Read a specific keyed probe entry.
+    pub fn read_probe(env: Env, id: u32) -> Result<ProbeRecord, Error> {
+        env.storage()
+            .persistent()
+            .get(&Key::Probe(id))
+            .ok_or(Error::NotPlanted)
     }
 
-    /// The probe must never extend its own TTL — that omission is what makes it
-    /// archive on the network's schedule instead of the contract's.
-    #[test]
-    fn the_probe_does_not_extend_its_own_ttl() {
-        use soroban_sdk::testutils::storage::Persistent as _;
-        use soroban_sdk::testutils::Ledger as _;
+    /// Batch plant multiple probe entries atomically with bounds checking.
+    pub fn batch_plant(env: Env, ids: Vec<u32>, notes: Vec<Symbol>) -> Result<u32, Error> {
+        let len = ids.len();
+        if len == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if len > MAX_BATCH_PROBE_SIZE || len != notes.len() {
+            return Err(Error::BatchTooLarge);
+        }
 
-        let env = Env::default();
-        let id = env.register(ArchivalProbe, ());
-        ArchivalProbeClient::new(&env, &id).plant(&symbol_short!("canary"));
+        let mut planted_count: u32 = 0;
+        let seq = env.ledger().sequence();
 
-        let ttl = env.as_contract(&id, || env.storage().persistent().get_ttl(&Key::Canary));
-        let min = env.ledger().get().min_persistent_entry_ttl;
+        for i in 0..len {
+            let id = ids.get(i).ok_or(Error::ArithmeticOverflow)?;
+            let note = notes.get(i).ok_or(Error::ArithmeticOverflow)?;
+            let key = Key::Probe(id);
 
-        assert!(
-            ttl < min,
-            "probe TTL {ttl} exceeds the network minimum {min}; something is \
-             extending it and the probe will not archive on schedule",
-        );
+            if !env.storage().persistent().has(&key) {
+                let record = ProbeRecord {
+                    note,
+                    planted_at: seq,
+                };
+                env.storage().persistent().set(&key, &record);
+                planted_count = planted_count
+                    .checked_add(1)
+                    .ok_or(Error::ArithmeticOverflow)?;
+            }
+        }
+
+        Ok(planted_count)
+    }
+
+    /// Batch read probe records in a single optimized pass without redundant lookups.
+    pub fn batch_read(env: Env, ids: Vec<u32>) -> Result<Vec<ProbeRecord>, Error> {
+        let len = ids.len();
+        if len == 0 {
+            return Err(Error::EmptyBatch);
+        }
+        if len > MAX_BATCH_PROBE_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+
+        let mut records = Vec::new(&env);
+        for i in 0..len {
+            let id = ids.get(i).ok_or(Error::ArithmeticOverflow)?;
+            let record: ProbeRecord = env
+                .storage()
+                .persistent()
+                .get(&Key::Probe(id))
+                .ok_or(Error::NotPlanted)?;
+            records.push_back(record);
+        }
+
+        Ok(records)
     }
 }
