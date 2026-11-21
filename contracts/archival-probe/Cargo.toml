@@ -36,6 +36,7 @@ doctest = false
 soroban-sdk = "27.0.5"
 
 [dev-dependencies]
+proptest = "1"
 soroban-sdk = { version = "27.0.5", features = ["testutils"] }
 
 [profile.release]
