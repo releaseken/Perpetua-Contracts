@@ -4636,6 +4636,32 @@ mod tests {
 
         /// Traps while the target is failing, so governance's dispatch panics
         /// and the host unwinds the entire transaction.
+        pub fn set_cap(env: Env, cap: i128) {
+            let controller: Address = env
+                .storage()
+                .instance()
+                .get(&FlakyTargetKey::Controller)
+                .expect("controller set by init");
+            controller.require_auth();
+            if env
+                .storage()
+                .instance()
+                .get(&FlakyTargetKey::Failing)
+                .unwrap_or(false)
+            {
+                panic!("downstream state locked");
+            }
+            env.storage().instance().set(&FlakyTargetKey::Cap, &cap);
+        }
+
+        pub fn cap(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&FlakyTargetKey::Cap)
+                .unwrap_or(0)
+        }
+    }
+
     // Timelock bypass audit (issue #50)
     //
     // Two layers:
@@ -4909,24 +4935,31 @@ mod tests {
             let controller: Address = env
                 .storage()
                 .instance()
-                .get(&FlakyTargetKey::Controller)
-                .expect("controller set by init");
+                .get(&MockTargetKey::Controller)
+                .expect("controller set");
             controller.require_auth();
-            if env
+            let calls: u32 = env
                 .storage()
                 .instance()
-                .get(&FlakyTargetKey::Failing)
-                .unwrap_or(false)
-            {
-                panic!("downstream state locked");
-            }
-            env.storage().instance().set(&FlakyTargetKey::Cap, &cap);
+                .get(&MockTargetKey::CallCount)
+                .expect("call count set");
+            env.storage()
+                .instance()
+                .set(&MockTargetKey::CallCount, &calls + 1);
+            env.storage().instance().set(&MockTargetKey::Cap, &cap);
+        }
+
+        pub fn call_count(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&MockTargetKey::CallCount)
+                .unwrap_or(0)
         }
 
         pub fn cap(env: Env) -> i128 {
             env.storage()
                 .instance()
-                .get(&FlakyTargetKey::Cap)
+                .get(&MockTargetKey::Cap)
                 .unwrap_or(0)
         }
     }
@@ -4995,33 +5028,9 @@ mod tests {
     /// Queue a proposal for `calldata` and advance past the timelock.
     fn queued(ctx: &Ctx, target: &Address, calldata: &Bytes) -> u32 {
         let id = ctx.client.propose(&ctx.signer_a, target, calldata);
-                .get(&MockTargetKey::Controller)
-                .expect("controller set");
-            controller.require_auth();
-            let calls: u32 = env
-                .storage()
-                .instance()
-                .get(&MockTargetKey::CallCount)
-                .expect("call count set");
-            env.storage()
-                .instance()
-                .set(&MockTargetKey::CallCount, &calls + 1);
-            env.storage().instance().set(&MockTargetKey::Cap, &cap);
-        }
-
-        pub fn call_count(env: Env) -> u32 {
-            env.storage()
-                .instance()
-                .get(&MockTargetKey::CallCount)
-                .unwrap_or(0)
-        }
-
-        pub fn cap(env: Env) -> i128 {
-            env.storage()
-                .instance()
-                .get(&MockTargetKey::Cap)
-                .unwrap_or(0)
-        }
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        id
     }
 
     /// A contract whose only purpose is the classic bypass shape: mutate a
@@ -5376,6 +5385,8 @@ mod tests {
         assert!(BatchTargetClient::new(&ctx.env, &target)
             .applied()
             .is_empty());
+    }
+
     /// Plausible backdoor entrypoint names — none of them may exist.
     #[test]
     fn test_no_backdoor_entrypoint_is_reachable() {
