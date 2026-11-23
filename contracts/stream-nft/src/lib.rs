@@ -78,6 +78,7 @@ pub enum Error {
     TokenNotFound,
     NotOwner,
     StreamRejected,
+    Overflow,
 }
 
 const STREAM_TRANSFER_RECIPIENT: &str = "transfer_recipient";
@@ -194,24 +195,30 @@ impl StreamNft {
             panic_with_error!(&env, Error::AlreadyMinted);
         }
         let supply = env.storage().instance().get(&DataKey::Supply).unwrap_or(0);
-        if supply == u64::MAX {
-            panic_with_error!(&env, Error::TokenNotFound);
-        }
+        let next_supply = match supply.checked_add(1) {
+            Some(s) => s,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Owner(stream_id), &caller);
-        bump(&env, &DataKey::Owner(stream_id));
         let balance: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::Balance(caller.clone()))
             .unwrap_or(0);
+        let next_balance = match balance.checked_add(1) {
+            Some(b) => b,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
+
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(caller.clone()), &(balance + 1));
+            .set(&DataKey::Owner(stream_id), &caller);
+        bump(&env, &DataKey::Owner(stream_id));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(caller.clone()), &next_balance);
         bump(&env, &DataKey::Balance(caller));
-        env.storage().instance().set(&DataKey::Supply, &(supply + 1));
+        env.storage().instance().set(&DataKey::Supply, &next_supply);
     }
 
     /// Transfer the claim token for `stream_id`, and reassign the underlying
@@ -230,36 +237,52 @@ impl StreamNft {
         };
         from.require_auth();
 
-        transfer_claim(&env, &config, stream_id, &to);
+        if from == to {
+            return;
+        }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Owner(stream_id), &to);
-        bump(&env, &DataKey::Owner(stream_id));
+        transfer_claim(&env, &config, stream_id, &to);
 
         let from_balance: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::Balance(from.clone()))
             .unwrap_or(0);
-        if from_balance == 1 {
-            env.storage()
-                .persistent()
-                .remove(&DataKey::Balance(from));
-        } else if from_balance > 1 {
-            env.storage()
-                .persistent()
-                .set(&DataKey::Balance(from.clone()), &(from_balance - 1));
-            bump(&env, &DataKey::Balance(from));
-        }
+        let next_from_balance = match from_balance.checked_sub(1) {
+            Some(b) => b,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
+
         let to_balance: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::Balance(to.clone()))
             .unwrap_or(0);
+        let next_to_balance = match to_balance.checked_add(1) {
+            Some(b) => b,
+            None => panic_with_error!(&env, Error::Overflow),
+        };
+
         env.storage()
             .persistent()
-            .set(&DataKey::Balance(to.clone()), &(to_balance + 1));
+            .set(&DataKey::Owner(stream_id), &to);
+        bump(&env, &DataKey::Owner(stream_id));
+
+        if next_from_balance == 0 {
+            env.storage().persistent().remove(&DataKey::Balance(from));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::Balance(from.clone()), &next_from_balance);
+            bump(&env, &DataKey::Balance(from));
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(to.clone()), &next_to_balance);
         bump(&env, &DataKey::Balance(to));
     }
 }
+
+#[cfg(test)]
+mod test;
