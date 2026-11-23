@@ -794,6 +794,7 @@ fn get_admin(env: &Env) -> Result<Address, GovernanceError> {
 }
 
 fn get_signers(env: &Env) -> Result<Vec<Address>, GovernanceError> {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::Signers)
@@ -801,6 +802,7 @@ fn get_signers(env: &Env) -> Result<Vec<Address>, GovernanceError> {
 }
 
 fn get_emergency_guardians(env: &Env) -> Vec<Address> {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::EmergencyGuardians)
@@ -808,6 +810,7 @@ fn get_emergency_guardians(env: &Env) -> Vec<Address> {
 }
 
 fn get_threshold(env: &Env) -> Result<u32, GovernanceError> {
+    bump_instance(env);
     env.storage()
         .instance()
         .get(&DataKey::Threshold)
@@ -4636,6 +4639,32 @@ mod tests {
 
         /// Traps while the target is failing, so governance's dispatch panics
         /// and the host unwinds the entire transaction.
+        pub fn set_cap(env: Env, cap: i128) {
+            let controller: Address = env
+                .storage()
+                .instance()
+                .get(&FlakyTargetKey::Controller)
+                .expect("controller set by init");
+            controller.require_auth();
+            if env
+                .storage()
+                .instance()
+                .get(&FlakyTargetKey::Failing)
+                .unwrap_or(false)
+            {
+                panic!("downstream state locked");
+            }
+            env.storage().instance().set(&FlakyTargetKey::Cap, &cap);
+        }
+
+        pub fn cap(env: Env) -> i128 {
+            env.storage()
+                .instance()
+                .get(&FlakyTargetKey::Cap)
+                .unwrap_or(0)
+        }
+    }
+
     // Timelock bypass audit (issue #50)
     //
     // Two layers:
@@ -4909,24 +4938,31 @@ mod tests {
             let controller: Address = env
                 .storage()
                 .instance()
-                .get(&FlakyTargetKey::Controller)
-                .expect("controller set by init");
+                .get(&MockTargetKey::Controller)
+                .expect("controller set");
             controller.require_auth();
-            if env
+            let calls: u32 = env
                 .storage()
                 .instance()
-                .get(&FlakyTargetKey::Failing)
-                .unwrap_or(false)
-            {
-                panic!("downstream state locked");
-            }
-            env.storage().instance().set(&FlakyTargetKey::Cap, &cap);
+                .get(&MockTargetKey::CallCount)
+                .expect("call count set");
+            env.storage()
+                .instance()
+                .set(&MockTargetKey::CallCount, &calls + 1);
+            env.storage().instance().set(&MockTargetKey::Cap, &cap);
+        }
+
+        pub fn call_count(env: Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&MockTargetKey::CallCount)
+                .unwrap_or(0)
         }
 
         pub fn cap(env: Env) -> i128 {
             env.storage()
                 .instance()
-                .get(&FlakyTargetKey::Cap)
+                .get(&MockTargetKey::Cap)
                 .unwrap_or(0)
         }
     }
@@ -4995,33 +5031,9 @@ mod tests {
     /// Queue a proposal for `calldata` and advance past the timelock.
     fn queued(ctx: &Ctx, target: &Address, calldata: &Bytes) -> u32 {
         let id = ctx.client.propose(&ctx.signer_a, target, calldata);
-                .get(&MockTargetKey::Controller)
-                .expect("controller set");
-            controller.require_auth();
-            let calls: u32 = env
-                .storage()
-                .instance()
-                .get(&MockTargetKey::CallCount)
-                .expect("call count set");
-            env.storage()
-                .instance()
-                .set(&MockTargetKey::CallCount, &calls + 1);
-            env.storage().instance().set(&MockTargetKey::Cap, &cap);
-        }
-
-        pub fn call_count(env: Env) -> u32 {
-            env.storage()
-                .instance()
-                .get(&MockTargetKey::CallCount)
-                .unwrap_or(0)
-        }
-
-        pub fn cap(env: Env) -> i128 {
-            env.storage()
-                .instance()
-                .get(&MockTargetKey::Cap)
-                .unwrap_or(0)
-        }
+        ctx.client.approve(&ctx.signer_a, &id);
+        ctx.client.approve(&ctx.signer_b, &id);
+        id
     }
 
     /// A contract whose only purpose is the classic bypass shape: mutate a
@@ -5376,6 +5388,8 @@ mod tests {
         assert!(BatchTargetClient::new(&ctx.env, &target)
             .applied()
             .is_empty());
+    }
+
     /// Plausible backdoor entrypoint names — none of them may exist.
     #[test]
     fn test_no_backdoor_entrypoint_is_reachable() {
@@ -5615,5 +5629,103 @@ mod tests {
         assert_eq!(target_client.call_count(), 1);
         assert_eq!(target_client.cap(), 42);
         assert!(ctx.client.get_proposal(&id).executed);
+    }
+
+    // -----------------------------------------------------------------------
+    // Automated entry lifetime extension & archival resilience (issue #354)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_instance_lifetime_extended_on_init() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, FluxoraGovernance);
+        let admin = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+
+        client.init(&admin, &vec![&env, signer_a], &1u32);
+
+        let instance_ttl = env.as_contract(&contract_id, || {
+            env.storage().instance().get_ttl()
+        });
+        assert!(
+            instance_ttl >= INSTANCE_BUMP_AMOUNT,
+            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT {INSTANCE_BUMP_AMOUNT}"
+        );
+    }
+
+    #[test]
+    fn test_instance_lifetime_extended_on_get_signers() {
+        let ctx = Ctx::setup();
+        let ttl_before = ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env.storage().instance().get_ttl()
+        });
+        assert!(ttl_before >= INSTANCE_BUMP_AMOUNT);
+
+        // Read signers view
+        let signers = ctx.client.get_signers();
+        assert_eq!(signers.len(), 3);
+
+        let ttl_after = ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env.storage().instance().get_ttl()
+        });
+        assert!(
+            ttl_after >= INSTANCE_BUMP_AMOUNT,
+            "instance TTL {ttl_after} must remain >= INSTANCE_BUMP_AMOUNT after get_signers"
+        );
+    }
+
+    #[test]
+    fn test_instance_lifetime_extended_on_get_threshold_and_quorum() {
+        let ctx = Ctx::setup();
+        let threshold = ctx.client.get_threshold();
+        assert_eq!(threshold, 2);
+
+        let quorum = ctx.client.quorum();
+        assert_eq!(quorum, 2);
+
+        let instance_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env.storage().instance().get_ttl()
+        });
+        assert!(
+            instance_ttl >= INSTANCE_BUMP_AMOUNT,
+            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT after threshold reads"
+        );
+    }
+
+    #[test]
+    fn test_instance_lifetime_extended_on_get_emergency_guardians() {
+        let ctx = Ctx::setup();
+        let guardians = ctx.client.get_emergency_guardians();
+        assert_eq!(guardians.len(), 0);
+
+        let instance_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env.storage().instance().get_ttl()
+        });
+        assert!(
+            instance_ttl >= INSTANCE_BUMP_AMOUNT,
+            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT after get_emergency_guardians"
+        );
+    }
+
+    #[test]
+    fn test_persistent_proposal_lifetime_extended_on_active_load() {
+        let ctx = Ctx::setup();
+        let target = Address::generate(&ctx.env);
+        let id = ctx
+            .client
+            .propose(&ctx.signer_a, &target, &ctx.calldata("x"));
+
+        // Load proposal and verify persistent TTL is bumped to active bump amount
+        let proposal = ctx.client.get_proposal(&id);
+        assert_eq!(proposal.status, ProposalStatus::Proposed);
+
+        let proposal_ttl = ctx.env.as_contract(&ctx.contract_id, || {
+            ctx.env.storage().persistent().get_ttl(&DataKey::Proposal(id))
+        });
+        assert!(
+            proposal_ttl >= ACTIVE_PROPOSAL_BUMP_AMOUNT,
+            "active proposal TTL {proposal_ttl} must be >= ACTIVE_PROPOSAL_BUMP_AMOUNT {ACTIVE_PROPOSAL_BUMP_AMOUNT}"
+        );
     }
 }

@@ -619,3 +619,22 @@ fn high_ledger_sequence_does_not_affect_cliff_gate() {
     h.assert_pool_invariant();
     h2.assert_pool_invariant();
 }
+
+#[test]
+fn stream_timestamps_adjacent_to_u64_max_boundary_preserve_conservation() {
+    let start = MAX_U64 - 2;
+    let cliff = MAX_U64 - 1;
+    let end = MAX_U64;
+    let deposit = 10_000i128;
+    let s = stream_at(deposit, start, end, cliff, 0, None);
+
+    assert_eq!(accrual::duration(&s), 2);
+    assert_eq!(accrual::vested(&s, start).expect("start"), 0);
+    assert_eq!(accrual::vested(&s, cliff).expect("cliff"), 5_000);
+    assert_eq!(accrual::vested(&s, end).expect("end"), deposit);
+
+    for ts in [start, cliff, end] {
+        assert_conservation(&s, ts);
+    }
+}
+

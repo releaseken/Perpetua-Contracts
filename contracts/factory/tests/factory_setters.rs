@@ -76,7 +76,10 @@ fn test_stream_salt_is_unique_across_ten_thousand_creations() {
 
     for stream_id in 0..10_000u64 {
         let salt = derive_stream_salt(&env, &sender, 0, stream_id);
-        assert!(salts.insert(salt.to_array()), "salt collision at {stream_id}");
+        assert!(
+            salts.insert(salt.to_array()),
+            "salt collision at {stream_id}"
+        );
     }
 }
 
@@ -105,7 +108,10 @@ fn test_stream_salt_keeps_the_existing_preimage_encoding() {
     preimage.append(&Bytes::from_slice(&env, &stream_id.to_be_bytes()));
     let expected = env.crypto().sha256(&preimage);
 
-    assert_eq!(derive_stream_salt(&env, &sender, nonce, stream_id), expected);
+    assert_eq!(
+        derive_stream_salt(&env, &sender, nonce, stream_id),
+        expected
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,32 +1277,14 @@ fn active_stream_cap_blocks_creation_until_terminal_release() {
     factory.set_max_active_streams(&1);
 
     factory.create_stream(
-        &sender,
-        &recipient,
-        &token,
-        &1_000,
-        &0,
-        &100,
-        &0,
-        &true,
-        &true,
-        &true,
+        &sender, &recipient, &token, &1_000, &0, &100, &0, &true, &true, &true,
     );
     assert_eq!(factory.get_factory_config().active_streams, 1);
 
     assert_eq!(
         factory
             .try_create_stream(
-                &sender,
-                &recipient,
-                &token,
-                &1_000,
-                &0,
-                &100,
-                &0,
-                &true,
-                &true,
-                &true,
+                &sender, &recipient, &token, &1_000, &0, &100, &0, &true, &true, &true,
             )
             .unwrap_err()
             .unwrap(),
@@ -1306,16 +1294,7 @@ fn active_stream_cap_blocks_creation_until_terminal_release() {
     factory.stream_terminated(&0);
     assert_eq!(factory.get_factory_config().active_streams, 0);
     factory.create_stream(
-        &sender,
-        &recipient,
-        &token,
-        &1_000,
-        &0,
-        &100,
-        &0,
-        &true,
-        &true,
-        &true,
+        &sender, &recipient, &token, &1_000, &0, &100, &0, &true, &true, &true,
     );
 }
 
