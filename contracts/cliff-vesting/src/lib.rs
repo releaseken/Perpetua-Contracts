@@ -872,6 +872,7 @@ impl CliffVesting {
 
 #[cfg(test)]
 mod test {
+    mod bft_partitions;
     mod common;
     mod create;
     mod withdraw;
