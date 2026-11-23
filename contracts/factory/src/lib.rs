@@ -45,7 +45,6 @@ pub use math::{calculate_bps_payout, calculate_fractional_payout, FractionalSpli
 /// policy interaction (same values as the stream and governance contracts).
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
-const DEFAULT_CREATIONS_PER_WINDOW: u32 = 100;
 const DEFAULT_RATE_LIMIT_WINDOW_LEDGERS: u32 = 17_280;
 const DEFAULT_MAX_DURATION: u64 = 157_680_000;
 
@@ -256,10 +255,6 @@ fn bump_ttl(env: &Env) {
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
-fn bump_instance(env: &Env) {
-    bump_ttl(env);
-}
-
 fn is_executing(env: &Env) -> bool {
     env.storage()
         .instance()
@@ -403,6 +398,9 @@ impl FluxoraFactory {
             return Err(FactoryError::AlreadyInitialized);
         }
         admin.require_auth();
+        if is_forbidden_admin(&env, &admin) {
+            return Err(FactoryError::InvalidNewAdmin);
+        }
         if min_duration > DEFAULT_MAX_DURATION {
             return Err(FactoryError::InvalidDuration);
         }
@@ -549,6 +547,9 @@ impl FluxoraFactory {
     // -----------------------------------------------------------------------
 
     fn guard(env: &Env) -> Result<FactoryConfig, FactoryError> {
+        if is_executing(env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let config = load_config(env)?;
         config.admin.clone().require_auth();
         Ok(config)
@@ -621,6 +622,9 @@ impl FluxoraFactory {
     /// # Errors
     /// - `NoPendingAdmin`: no transfer has been proposed.
     pub fn accept_admin(env: Env) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let pending: Address = env
             .storage()
             .instance()
@@ -881,7 +885,12 @@ impl FluxoraFactory {
         if config.max_creations_per_window != u32::MAX {
             record_creation_with_config(&env, &sender, &config)?;
         }
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
 
+        let initial_active = config.active_streams;
+        set_executing(&env);
         let stream_id = env.invoke_contract::<u64>(
             &config.stream_contract,
             &Symbol::new(&env, "create_stream"),
@@ -899,11 +908,17 @@ impl FluxoraFactory {
             )
                 .into_val(&env),
         );
+        clear_executing(&env);
 
         config.active_streams = config
             .active_streams
             .checked_add(1)
             .ok_or(FactoryError::CapacityCapExceeded)?;
+        if config.active_streams != initial_active.saturating_add(1)
+            || config.active_streams > config.max_active_streams
+        {
+            return Err(FactoryError::InvariantViolation);
+        }
         env.storage().instance().set(&DataKey::Config, &config);
         Ok(stream_id)
     }
@@ -914,6 +929,9 @@ impl FluxoraFactory {
     /// contract integration should invoke it exactly once for cancellation or
     /// depletion. Calls made when the active count is already zero are rejected.
     pub fn stream_terminated(env: Env, _stream_id: u64) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let mut config = load_config(&env)?;
         config.stream_contract.require_auth();
         if config.active_streams == 0 {
