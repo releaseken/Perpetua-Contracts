@@ -7,6 +7,8 @@
 #
 # Issue #385: feat(contracts/fee-accrual): add granular role-based authorization
 # to fee-accrual to prevent unauthorized configuration updates.
+# Issue #390: feat(contracts/fee-accrual): implement automated entry lifetime
+# extension for fee-accrual to guarantee archival resilience.
 #
 #   cargo build  --target wasm32v1-none --release
 #   cargo test

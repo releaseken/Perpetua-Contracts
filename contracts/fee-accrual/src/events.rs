@@ -57,6 +57,13 @@ pub struct PauseStatusEvent {
     pub caller: Address,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlExtendedEvent {
+    pub stream_id: u64,
+    pub extended_to_ledgers: u32,
+}
+
 pub fn emit_fee_accrued(
     env: &Env,
     stream_id: u64,
@@ -148,6 +155,15 @@ pub fn emit_pause_status(env: &Env, paused: bool, caller: &Address) {
     let event = PauseStatusEvent {
         paused,
         caller: caller.clone(),
+    };
+    env.events().publish(topics, event);
+}
+
+pub fn emit_ttl_extended(env: &Env, stream_id: u64, extended_to_ledgers: u32) {
+    let topics = (Symbol::new(env, "ttl_extended"), stream_id);
+    let event = TtlExtendedEvent {
+        stream_id,
+        extended_to_ledgers,
     };
     env.events().publish(topics, event);
 }

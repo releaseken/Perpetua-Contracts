@@ -27,7 +27,9 @@
 //! previous admin. The zero address and the factory's own address are rejected
 //! outright as admin candidates in both the single-step and two-step paths.
 
+pub mod error;
 pub mod invariants;
+pub use error::{ErrorCategory, FactoryError};
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
@@ -45,9 +47,9 @@ pub use math::{calculate_bps_payout, calculate_fractional_payout, FractionalSpli
 /// policy interaction (same values as the stream and governance contracts).
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17_280;
 const INSTANCE_BUMP_AMOUNT: u32 = 120_960;
-const DEFAULT_CREATIONS_PER_WINDOW: u32 = 100;
 const DEFAULT_RATE_LIMIT_WINDOW_LEDGERS: u32 = 17_280;
 const DEFAULT_MAX_DURATION: u64 = 157_680_000;
+const MAX_BATCH_SIZE: u32 = 32;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -157,43 +159,16 @@ pub struct StreamCreated {
     pub recipient: Address,
 }
 
-/// Error codes for the factory contract.
-#[contracterror]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u32)]
-pub enum FactoryError {
-    /// Contract has not been initialised.
-    NotInitialized = 1,
-    /// Contract is already initialised.
-    AlreadyInitialized = 2,
-    /// Caller is not the admin.
-    Unauthorized = 3,
-    /// The recipient is not allowlisted.
-    AllowlistDenied = 4,
-    /// The proposed admin cannot be set: it is the zero address or the factory
-    /// contract itself, either of which would permanently lock the factory.
-    InvalidNewAdmin = 5,
-    /// `accept_admin` was called but no admin transfer has been proposed.
-    NoPendingAdmin = 6,
-    InvalidDuration = 7,
-    TokenNotAllowed = 8,
-    RateLimitExceeded = 9,
-    InvalidRateLimit = 10,
-    CapacityCapExceeded = 11,
-    ActiveStreamCountUnderflow = 12,
-    CreationPaused = 13,
-    DepositCapExceeded = 14,
-    InvalidRateBounds = 15,
-    RateBelowMinimum = 16,
-    RateAboveMaximum = 17,
-    InvalidDeposit = 18,
-    InvalidCliff = 19,
-    /// A re-entrant call was detected; the factory is already executing a state-modifying call.
-    ReentrancyGuard = 20,
-    /// A post-condition invariant check failed after a state mutation.
-    InvariantViolation = 21,
+/// A persistent entry's TTL was extended by automated maintenance or a keeper.
+#[contractevent]
+pub struct TtlExtended {
+    #[topic]
+    pub target_key: Symbol,
+    #[topic]
+    pub target_address: Address,
+    pub threshold: u32,
+    pub bump_amount: u32,
 }
-
 pub trait FactoryGovernance {
     fn set_admin(env: Env, new_admin: Address) -> Result<(), FactoryError>;
     fn set_stream_contract(env: Env, stream_contract: Address) -> Result<(), FactoryError>;
@@ -250,14 +225,11 @@ pub fn derive_stream_salt(env: &Env, sender: &Address, nonce: u64, stream_id: u6
 }
 
 /// Extends the factory instance entry to the network maximum.
-fn bump_ttl(env: &Env) {
-    env.storage()
-        .instance()
-        .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-}
-
-fn bump_instance(env: &Env) {
-    bump_ttl(env);
+pub fn bump_ttl(env: &Env) {
+    let max_ttl = env.storage().max_ttl();
+    let threshold = INSTANCE_LIFETIME_THRESHOLD.min(max_ttl);
+    let bump = INSTANCE_BUMP_AMOUNT.min(max_ttl);
+    env.storage().instance().extend_ttl(threshold, bump);
 }
 
 fn is_executing(env: &Env) -> bool {
@@ -403,6 +375,9 @@ impl FluxoraFactory {
             return Err(FactoryError::AlreadyInitialized);
         }
         admin.require_auth();
+        if is_forbidden_admin(&env, &admin) {
+            return Err(FactoryError::InvalidNewAdmin);
+        }
         if min_duration > DEFAULT_MAX_DURATION {
             return Err(FactoryError::InvalidDuration);
         }
@@ -497,11 +472,7 @@ impl FluxoraFactory {
     }
 
     /// Validate a stream duration against the configured inclusive bounds.
-    pub fn validate_duration(
-        env: Env,
-        start_time: u64,
-        end_time: u64,
-    ) -> Result<(), FactoryError> {
+    pub fn validate_duration(env: Env, start_time: u64, end_time: u64) -> Result<(), FactoryError> {
         let config = load_config(&env)?;
         let duration = end_time
             .checked_sub(start_time)
@@ -523,6 +494,116 @@ impl FluxoraFactory {
         record_creation_with_config(&env, &sender, &config)
     }
 
+    /// Extend the persistent storage TTL for a specific allowlist entry.
+    ///
+    /// Permissionless keeper entrypoint: ensures archival resilience for active
+    /// recipients even during long idle intervals without state mutations.
+    pub fn extend_allowlist_ttl(env: Env, recipient: Address) -> Result<(), FactoryError> {
+        load_config(&env)?;
+        let key = DataKey::Allowlist(recipient.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(FactoryError::AllowlistDenied);
+        }
+        bump_allowlist(&env, &key);
+        TtlExtended {
+            target_key: Symbol::new(&env, "allowlist"),
+            target_address: recipient,
+            threshold: INSTANCE_LIFETIME_THRESHOLD,
+            bump_amount: INSTANCE_BUMP_AMOUNT,
+        }
+        .publish(&env);
+        bump_ttl(&env);
+        Ok(())
+    }
+
+    /// Extend the persistent storage TTL for a specific token allowlist entry.
+    ///
+    /// Permissionless keeper entrypoint: protects approved tokens from archiving.
+    pub fn extend_token_allowlist_ttl(env: Env, token: Address) -> Result<(), FactoryError> {
+        load_config(&env)?;
+        let key = DataKey::TokenAllowlist(token.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(FactoryError::TokenNotAllowed);
+        }
+        bump_allowlist(&env, &key);
+        TtlExtended {
+            target_key: Symbol::new(&env, "token"),
+            target_address: token,
+            threshold: INSTANCE_LIFETIME_THRESHOLD,
+            bump_amount: INSTANCE_BUMP_AMOUNT,
+        }
+        .publish(&env);
+        bump_ttl(&env);
+        Ok(())
+    }
+
+    /// Batch extend persistent storage TTL for multiple allowlist recipients.
+    ///
+    /// Permissionless keeper sweep: skips non-existent keys without aborting
+    /// and returns the count of entries successfully extended.
+    pub fn batch_extend_allowlist_ttl(
+        env: Env,
+        recipients: soroban_sdk::Vec<Address>,
+    ) -> Result<u32, FactoryError> {
+        load_config(&env)?;
+        let len = recipients.len();
+        if len == 0 || len > MAX_BATCH_SIZE {
+            return Err(FactoryError::InvalidDuration);
+        }
+
+        let mut extended = 0u32;
+        for recipient in recipients.iter() {
+            let key = DataKey::Allowlist(recipient.clone());
+            if env.storage().persistent().has(&key) {
+                bump_allowlist(&env, &key);
+                TtlExtended {
+                    target_key: Symbol::new(&env, "allowlist"),
+                    target_address: recipient,
+                    threshold: INSTANCE_LIFETIME_THRESHOLD,
+                    bump_amount: INSTANCE_BUMP_AMOUNT,
+                }
+                .publish(&env);
+                extended = extended
+                    .checked_add(1)
+                    .ok_or(FactoryError::CapacityCapExceeded)?;
+            }
+        }
+        bump_ttl(&env);
+        Ok(extended)
+    }
+
+    /// Batch extend persistent storage TTL for multiple approved token addresses.
+    pub fn batch_extend_token_ttl(
+        env: Env,
+        tokens: soroban_sdk::Vec<Address>,
+    ) -> Result<u32, FactoryError> {
+        load_config(&env)?;
+        let len = tokens.len();
+        if len == 0 || len > MAX_BATCH_SIZE {
+            return Err(FactoryError::InvalidDuration);
+        }
+
+        let mut extended = 0u32;
+        for token in tokens.iter() {
+            let key = DataKey::TokenAllowlist(token.clone());
+            if env.storage().persistent().has(&key) {
+                bump_allowlist(&env, &key);
+                TtlExtended {
+                    target_key: Symbol::new(&env, "token"),
+                    target_address: token,
+                    threshold: INSTANCE_LIFETIME_THRESHOLD,
+                    bump_amount: INSTANCE_BUMP_AMOUNT,
+                }
+                .publish(&env);
+                extended = extended
+                    .checked_add(1)
+                    .ok_or(FactoryError::CapacityCapExceeded)?;
+            }
+        }
+        bump_ttl(&env);
+        Ok(extended)
+    }
+
     /// True when the factory is paused and stream creation is rejected.
     ///
     /// # Errors
@@ -535,13 +616,28 @@ impl FluxoraFactory {
     }
 
     /// Return the canonical salt for a child stream deployment.
-    pub fn derive_stream_salt(
-        env: Env,
-        sender: Address,
-        nonce: u64,
-        stream_id: u64,
-    ) -> BytesN<32> {
+    pub fn derive_stream_salt(env: Env, sender: Address, nonce: u64, stream_id: u64) -> BytesN<32> {
         crate::derive_stream_salt(&env, &sender, nonce, stream_id)
+    }
+
+    /// Return human-readable error description for a numeric error discriminant (issue #362).
+    ///
+    /// Enables client SDKs, block explorers, and monitoring indexers to query
+    /// meaningful error diagnostics on-chain without hardcoding strings.
+    pub fn error_message(env: Env, discriminant: u32) -> String {
+        let msg = FactoryError::from_discriminant(discriminant)
+            .map(|e| e.message())
+            .unwrap_or("");
+        String::from_str(&env, msg)
+    }
+
+    /// Return the single-character group letter ('A' through 'E') for an error discriminant.
+    ///
+    /// Returns 0 (NUL byte) if the discriminant is unrecognized.
+    pub fn error_group(_env: Env, discriminant: u32) -> u32 {
+        FactoryError::from_discriminant(discriminant)
+            .map(|e| e.group() as u32)
+            .unwrap_or(0)
     }
 
     // -----------------------------------------------------------------------
@@ -549,6 +645,9 @@ impl FluxoraFactory {
     // -----------------------------------------------------------------------
 
     fn guard(env: &Env) -> Result<FactoryConfig, FactoryError> {
+        if is_executing(env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let config = load_config(env)?;
         config.admin.clone().require_auth();
         Ok(config)
@@ -621,6 +720,9 @@ impl FluxoraFactory {
     /// # Errors
     /// - `NoPendingAdmin`: no transfer has been proposed.
     pub fn accept_admin(env: Env) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let pending: Address = env
             .storage()
             .instance()
@@ -881,7 +983,12 @@ impl FluxoraFactory {
         if config.max_creations_per_window != u32::MAX {
             record_creation_with_config(&env, &sender, &config)?;
         }
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
 
+        let initial_active = config.active_streams;
+        set_executing(&env);
         let stream_id = env.invoke_contract::<u64>(
             &config.stream_contract,
             &Symbol::new(&env, "create_stream"),
@@ -899,12 +1006,19 @@ impl FluxoraFactory {
             )
                 .into_val(&env),
         );
+        clear_executing(&env);
 
         config.active_streams = config
             .active_streams
             .checked_add(1)
             .ok_or(FactoryError::CapacityCapExceeded)?;
+        if config.active_streams != initial_active.saturating_add(1)
+            || config.active_streams > config.max_active_streams
+        {
+            return Err(FactoryError::InvariantViolation);
+        }
         env.storage().instance().set(&DataKey::Config, &config);
+        bump_ttl(&env);
         Ok(stream_id)
     }
 
@@ -914,6 +1028,9 @@ impl FluxoraFactory {
     /// contract integration should invoke it exactly once for cancellation or
     /// depletion. Calls made when the active count is already zero are rejected.
     pub fn stream_terminated(env: Env, _stream_id: u64) -> Result<(), FactoryError> {
+        if is_executing(&env) {
+            return Err(FactoryError::ReentrancyGuard);
+        }
         let mut config = load_config(&env)?;
         config.stream_contract.require_auth();
         if config.active_streams == 0 {
@@ -999,10 +1116,11 @@ impl FactoryGovernance for FluxoraFactory {
     }
 }
 
-/// Extends the TTL of an allowlist entry when it is (re)written so a populated,
+/// Extends the TTL of an allowlist entry when it is (re)written or accessed so a populated,
 /// actively-queried allowlist stays readable between admin rotations.
-fn bump_allowlist(env: &Env, key: &DataKey) {
-    env.storage()
-        .persistent()
-        .extend_ttl(key, INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+pub fn bump_allowlist(env: &Env, key: &DataKey) {
+    let max_ttl = env.storage().max_ttl();
+    let threshold = INSTANCE_LIFETIME_THRESHOLD.min(max_ttl);
+    let bump = INSTANCE_BUMP_AMOUNT.min(max_ttl);
+    env.storage().persistent().extend_ttl(key, threshold, bump);
 }
