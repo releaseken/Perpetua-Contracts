@@ -157,10 +157,12 @@ fn create_emits_stream_created_event_with_full_initial_state() {
 
     let event = &events[0];
     let soroban_sdk::xdr::ContractEventBody::V0(body) = &event.body;
-    let mut topics = soroban_sdk::vec![&h.env];
-    for topic in body.topics.iter() {
-        topics.push_back(soroban_sdk::Val::try_from_val(&h.env, topic).unwrap());
-    }
+    let topic_vals: std::vec::Vec<Val> = body
+        .topics
+        .iter()
+        .map(|topic| soroban_sdk::Val::try_from_val(&h.env, topic).unwrap())
+        .collect();
+    let topics = soroban_sdk::Vec::from_slice(&h.env, &topic_vals);
 
     assert_eq!(topics.len(), 4, "StreamCreated: topic[0] + stream_id + sender + recipient = 4");
     assert_eq!(topics.get(0).unwrap().try_into_val(&h.env).unwrap(), Symbol::new(&h.env, "stream_created"));

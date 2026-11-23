@@ -27,11 +27,23 @@
 //! cannot archive for a month.
 //!
 //! This probe deliberately does the one thing Perpetua never does: it writes a
-//! persistent entry and **never extends its TTL**. The entry then lives exactly
+//! persistent canary entry and **never extends its TTL**. The entry then lives exactly
 //! `min_persistent_ttl` and archives as early as the network permits. The
 //! restore mechanism it exercises is identical for any persistent entry — it is
 //! a property of the ledger, not of the contract — so proving it here proves it
 //! for `DataKey::Stream(id)`.
+//!
+//! ## Automated Lifetime Extension & Archival Resilience (Issue #381)
+//!
+//! While the primary canary entry `Key::Canary` deliberately receives no TTL
+//! extension so as to archive on the network schedule, the contract guarantees
+//! instance state resilience and operational continuity through automated entry
+//! lifetime extension:
+//! 1. Instance storage carrying execution state (`Key::Executing`) and probe accounting
+//!    (`Key::ProbeCount`) is automatically refreshed via [`invariants::extend_instance_lifetime`].
+//! 2. Resilient probe entries and keeper sweeps can invoke [`ArchivalProbe::extend_probe_lifetime`]
+//!    or [`ArchivalProbe::batch_extend_probe_lifetime`] to refresh designated probe entries up to
+//!    `max_ttl()`, ensuring long-term ledger resilience without footprint bloat.
 //!
 //! ## What it deliberately does not do
 //!
@@ -102,18 +114,38 @@ pub struct ArchivalProbe;
 
 #[contractimpl]
 impl ArchivalProbe {
-    /// Plant the canary once. Retries are first-write-wins, so an ambiguous
-    /// transaction result cannot reset the archival countdown or replace the
-    /// original note. The entry deliberately receives no TTL extension.
+    /// Plant the canary once with re-entrancy protection, state synchronization, and instance lifetime extension.
+    /// Retries are first-write-wins, so an ambiguous transaction result cannot
+    /// reset the archival countdown or replace the original note.
+    /// The entry deliberately receives no persistent TTL extension.
     ///
     /// Permissionless: there is nothing here worth protecting.
-    pub fn plant(env: Env, note: Symbol) {
-        if env.storage().persistent().has(&Key::Canary) {
-            return;
+    pub fn plant(env: Env, note: Symbol) -> Result<(), ProbeError> {
+        invariants::acquire_executing(&env)?;
+        let result = Self::plant_inner(&env, note);
+        invariants::release_executing(&env);
+        invariants::extend_instance_lifetime(&env);
+        result
+    }
+
+    fn plant_inner(env: &Env, note: Symbol) -> Result<(), ProbeError> {
+        let count_before = Self::load_probe_count(env);
+        let mut planted_delta: u32 = 0;
+
+        if !env.storage().persistent().has(&Key::Canary) {
+            env.storage().persistent().set(&Key::Canary, &note);
+            // No extend_ttl call on Key::Canary. That omission is the entire point
+            // of this contract; do not "fix" it.
+            let count_after = count_before
+                .checked_add(1)
+                .ok_or(ProbeError::ArithmeticOverflow)?;
+            env.storage().instance().set(&Key::ProbeCount, &count_after);
+            planted_delta = 1;
         }
-        env.storage().persistent().set(&Key::Canary, &note);
-        // No extend_ttl call. That omission is the entire point of this
-        // contract; do not "fix" it.
+
+        let count_final = Self::load_probe_count(env);
+        invariants::assert_state_sync(count_before, count_final, planted_delta)?;
+        Ok(())
     }
 
     /// Read the canary.
@@ -121,11 +153,11 @@ impl ArchivalProbe {
     /// Once the entry archives, invoking this fails at the network level before
     /// the contract body runs — the caller must resubmit with a
     /// `RestoreFootprint` operation. That failure is the behaviour under test.
-    pub fn read(env: Env) -> Result<Symbol, Error> {
+    pub fn read(env: Env) -> Result<Symbol, ProbeError> {
         env.storage()
             .persistent()
             .get(&Key::Canary)
-            .ok_or(Error::NotPlanted)
+            .ok_or(ProbeError::NotPlanted)
     }
 
     /// Whether the canary is present and live.
