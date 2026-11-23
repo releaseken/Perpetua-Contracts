@@ -243,12 +243,11 @@ impl StreamNft {
         };
         from.require_auth();
 
-        transfer_claim(&env, &config, stream_id, &to);
+        if from == to {
+            return;
+        }
 
-        env.storage()
-            .persistent()
-            .set(&DataKey::Owner(stream_id), &to);
-        bump(&env, &DataKey::Owner(stream_id));
+        transfer_claim(&env, &config, stream_id, &to);
 
         let from_balance: u32 = env
             .storage()

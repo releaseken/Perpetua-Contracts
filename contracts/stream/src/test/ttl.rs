@@ -603,3 +603,21 @@ fn a_year_long_stream_survives_on_keeper_sweeps_alone() {
     let after = h.get(id);
     assert_eq!(after.withdrawn, 365 * ONE);
 }
+
+#[test]
+fn automated_entry_lifetime_extension_resilience_across_decay_cycles() {
+    let h = Harness::new();
+    let id = h.create_simple(500 * ONE, 60 * DAY);
+    let initial_ttl = ttl_of(&h, id);
+
+    // Decay TTL close to the minimum threshold and verify automated extension
+    // restores the full schedule + buffer lifetime without altering stream state.
+    age_ledgers(&h, initial_ttl - 500);
+    assert!(ttl_of(&h, id) < 1_000);
+
+    let extended = h.client.extend_stream_ttl(&id);
+    assert_eq!(ttl_of(&h, id), extended);
+    assert!(!was_restored(&h, id));
+    assert_eq!(h.get(id).deposited, 500 * ONE);
+}
+
