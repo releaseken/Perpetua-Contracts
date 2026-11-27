@@ -1,4 +1,5 @@
-//! Shared test harness, unit/fuzz tests, and fractional withdrawal verification for archival probe.
+//! Shared test harness, unit/fuzz tests, Byzantine fault tolerance scenarios,
+//! and fractional withdrawal verification for archival probe.
 
 use super::*;
 use soroban_sdk::symbol_short;
@@ -703,6 +704,151 @@ fn formal_invariants_and_integrity_assertions() {
         12345,
         &claimant
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Byzantine Fault Tolerance & Network Partition Scenarios (main #378)
+// ---------------------------------------------------------------------------
+
+/// Scenario 1: Network Partition Split-Brain Concurrent Plant Attempts
+/// Under network partition, two replicas or partitioned callers attempt to plant
+/// divergent canary notes. The contract must guarantee absolute first-write-wins
+/// deterministic consensus and never overwrite the original canary note.
+#[test]
+fn bft_network_partition_split_brain_plant_concurrency() {
+    let h = TestHarness::new();
+
+    let partition_a_note = symbol_short!("part_a");
+    let partition_b_note = symbol_short!("part_b");
+    let partition_c_note = symbol_short!("part_c");
+
+    h.client.plant(&partition_a_note);
+    assert_eq!(h.client.read(), partition_a_note);
+
+    h.advance_ledgers(50);
+    h.client.plant(&partition_b_note);
+    assert_eq!(
+        h.client.read(),
+        partition_a_note,
+        "Partition B must not overwrite"
+    );
+
+    h.advance_ledgers(100);
+    h.client.plant(&partition_c_note);
+    assert_eq!(
+        h.client.read(),
+        partition_a_note,
+        "Partition C must not overwrite"
+    );
+}
+
+/// Scenario 2: Byzantine Replay Storm with Simulated Ledger Skew
+/// Replayed plant transactions across large ledger gaps must not refresh the
+/// canary TTL or reset the archival countdown.
+#[test]
+fn bft_replay_storm_with_ledger_skew_preserves_ttl_decay() {
+    let h = TestHarness::new();
+    let original_note = symbol_short!("orig");
+
+    h.client.plant(&original_note);
+    let initial_ttl = h.env.as_contract(&h.contract_id, || {
+        h.env.storage().persistent().get_ttl(&Key::Canary)
+    });
+
+    h.advance_ledgers(250);
+
+    let decayed_ttl = h.env.as_contract(&h.contract_id, || {
+        h.env.storage().persistent().get_ttl(&Key::Canary)
+    });
+    assert!(decayed_ttl < initial_ttl, "TTL must decrease over ledgers");
+
+    for _ in 0..10 {
+        h.client.plant(&symbol_short!("replay"));
+    }
+
+    let post_attack_ttl = h.env.as_contract(&h.contract_id, || {
+        h.env.storage().persistent().get_ttl(&Key::Canary)
+    });
+    assert_eq!(
+        post_attack_ttl, decayed_ttl,
+        "Replayed transactions must not bump TTL or reset archival window"
+    );
+    assert_eq!(h.client.read(), original_note);
+}
+
+/// Scenario 3: Batch Plant Under Partition With Partial Byzantine Corruptions
+/// Duplicate keys in a partitioned batch must preserve the first-written note.
+#[test]
+fn bft_partitioned_batch_plant_idempotency_and_integrity() {
+    let h = TestHarness::new();
+
+    let mut ids1 = Vec::new(&h.env);
+    let mut notes1 = Vec::new(&h.env);
+    ids1.push_back(1);
+    notes1.push_back(symbol_short!("node1"));
+    ids1.push_back(2);
+    notes1.push_back(symbol_short!("node2"));
+
+    let planted = h.client.batch_plant(&ids1, &notes1);
+    assert_eq!(planted, 2);
+
+    h.advance_ledgers(15);
+    let mut ids2 = Vec::new(&h.env);
+    let mut notes2 = Vec::new(&h.env);
+    ids2.push_back(1);
+    notes2.push_back(symbol_short!("corrupt"));
+    ids2.push_back(3);
+    notes2.push_back(symbol_short!("node3"));
+
+    let planted2 = h.client.batch_plant(&ids2, &notes2);
+    assert_eq!(planted2, 1);
+
+    let p1 = h.client.read_probe(&1);
+    assert_eq!(p1.note, symbol_short!("node1"));
+
+    let p3 = h.client.read_probe(&3);
+    assert_eq!(p3.note, symbol_short!("node3"));
+}
+
+/// Scenario 4: Boundary Defenses Against Malformed/Mismatched Byzantine Batches
+#[test]
+fn bft_byzantine_malformed_batch_defenses() {
+    let h = TestHarness::new();
+
+    let empty_ids = Vec::new(&h.env);
+    let empty_notes = Vec::new(&h.env);
+    assert_eq!(
+        h.client
+            .try_batch_plant(&empty_ids, &empty_notes)
+            .unwrap_err()
+            .unwrap(),
+        Error::EmptyBatch
+    );
+
+    let mut ids = Vec::new(&h.env);
+    ids.push_back(10);
+    ids.push_back(11);
+    let mut notes = Vec::new(&h.env);
+    notes.push_back(symbol_short!("ten"));
+
+    assert_eq!(
+        h.client.try_batch_plant(&ids, &notes).unwrap_err().unwrap(),
+        Error::BatchTooLarge
+    );
+
+    let mut big_ids = Vec::new(&h.env);
+    let mut big_notes = Vec::new(&h.env);
+    for i in 0..33 {
+        big_ids.push_back(i);
+        big_notes.push_back(symbol_short!("probe"));
+    }
+    assert_eq!(
+        h.client
+            .try_batch_plant(&big_ids, &big_notes)
+            .unwrap_err()
+            .unwrap(),
+        Error::BatchTooLarge
+    );
 }
 
 #[cfg(test)]

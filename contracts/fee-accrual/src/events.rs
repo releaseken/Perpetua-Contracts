@@ -22,9 +22,18 @@ pub struct FeeClaimedEvent {
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeConfigUpdatedEvent {
+    pub fee_admin: Address,
     pub fee_recipient: Address,
     pub protocol_fee_bps: u32,
     pub keeper_split_bps: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleUpdatedEvent {
+    pub role: Symbol,
+    pub old_holder: Address,
+    pub new_holder: Address,
 }
 
 #[contracttype]
@@ -39,6 +48,32 @@ pub struct AdminProposedEvent {
 pub struct AdminTransferredEvent {
     pub old_admin: Address,
     pub new_admin: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PauseStatusEvent {
+    pub paused: bool,
+    pub caller: Address,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchFeeSettledEvent {
+    pub caller: Address,
+    pub recipient: Address,
+    pub streams_processed: u32,
+    pub total_gross_amount: i128,
+    pub total_protocol_fee: i128,
+    pub total_keeper_fee: i128,
+    pub total_net_amount: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TtlExtendedEvent {
+    pub stream_id: u64,
+    pub extended_to_ledgers: u32,
 }
 
 pub fn emit_fee_accrued(
@@ -79,15 +114,32 @@ pub fn emit_fee_claimed(
 
 pub fn emit_config_updated(
     env: &Env,
+    fee_admin: &Address,
     fee_recipient: &Address,
     protocol_fee_bps: u32,
     keeper_split_bps: u32,
 ) {
     let topics = (Symbol::new(env, "fee_config_updated"),);
     let event = FeeConfigUpdatedEvent {
+        fee_admin: fee_admin.clone(),
         fee_recipient: fee_recipient.clone(),
         protocol_fee_bps,
         keeper_split_bps,
+    };
+    env.events().publish(topics, event);
+}
+
+pub fn emit_role_updated(
+    env: &Env,
+    role: Symbol,
+    old_holder: &Address,
+    new_holder: &Address,
+) {
+    let topics = (Symbol::new(env, "role_updated"), role);
+    let event = RoleUpdatedEvent {
+        role,
+        old_holder: old_holder.clone(),
+        new_holder: new_holder.clone(),
     };
     env.events().publish(topics, event);
 }
@@ -106,6 +158,48 @@ pub fn emit_admin_transferred(env: &Env, old_admin: &Address, new_admin: &Addres
     let event = AdminTransferredEvent {
         old_admin: old_admin.clone(),
         new_admin: new_admin.clone(),
+    };
+    env.events().publish(topics, event);
+}
+
+pub fn emit_pause_status(env: &Env, paused: bool, caller: &Address) {
+    let topics = (Symbol::new(env, "fee_pause_status"),);
+    let event = PauseStatusEvent {
+        paused,
+        caller: caller.clone(),
+    };
+    env.events().publish(topics, event);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn emit_batch_fee_settled(
+    env: &Env,
+    caller: &Address,
+    recipient: &Address,
+    streams_processed: u32,
+    total_gross_amount: i128,
+    total_protocol_fee: i128,
+    total_keeper_fee: i128,
+    total_net_amount: i128,
+) {
+    let topics = (Symbol::new(env, "batch_fee_settled"), caller, recipient);
+    let event = BatchFeeSettledEvent {
+        caller: caller.clone(),
+        recipient: recipient.clone(),
+        streams_processed,
+        total_gross_amount,
+        total_protocol_fee,
+        total_keeper_fee,
+        total_net_amount,
+    };
+    env.events().publish(topics, event);
+}
+
+pub fn emit_ttl_extended(env: &Env, stream_id: u64, extended_to_ledgers: u32) {
+    let topics = (Symbol::new(env, "fee_ttl_extended"), stream_id);
+    let event = TtlExtendedEvent {
+        stream_id,
+        extended_to_ledgers,
     };
     env.events().publish(topics, event);
 }

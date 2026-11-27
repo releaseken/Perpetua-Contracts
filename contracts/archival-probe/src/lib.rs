@@ -94,12 +94,14 @@
 //!
 //! and for the live-network round trip, `script/archival-canary.sh`.
 
+pub mod error;
 pub mod invariants;
 pub mod math;
 
 #[cfg(test)]
 mod test;
 
+pub use error::{ErrorCategory, ProbeError};
 pub use math::{calculate_bps_withdrawal, calculate_fractional_withdrawal, FractionalSplit};
 
 use soroban_sdk::{
@@ -111,6 +113,12 @@ pub const MAX_BATCH_PROBE_SIZE: u32 = 32;
 
 /// Default maximum batch size setting.
 pub const DEFAULT_MAX_BATCH_SIZE: u32 = 32;
+
+/// Threshold in ledgers (~7 days at 5s/ledger) before TTL extension triggers.
+pub const LIFETIME_THRESHOLD_LEDGERS: u32 = 120_960;
+
+/// Target bump amount in ledgers (~30 days at 5s/ledger) for resilient entries.
+pub const BUMP_AMOUNT_LEDGERS: u32 = 518_400;
 
 /// Granular functional roles for archival probe configuration and operations.
 #[contracttype]
@@ -172,17 +180,21 @@ pub struct ConfigUpdated {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Key {
     /// The single persistent entry whose archival we are waiting for.
-    Canary,
+    Canary = 0,
     /// Multi-probe partitioned canaries identified by sequence id.
-    Probe(u32),
+    Probe(u32) = 1,
     /// Batch claim probe entries for cross-contract claim verification.
-    ClaimProbe(u64),
+    ClaimProbe(u64) = 2,
     /// Contract configuration record.
-    Config,
+    Config = 3,
     /// Pending admin nominee for two-step rotation.
-    PendingAdmin,
+    PendingAdmin = 4,
     /// Granular role assignments: (Role, Address) -> bool.
-    Role(Role, Address),
+    Role(Role, Address) = 5,
+    /// Execution guard in instance storage to prevent re-entrancy.
+    Executing = 6,
+    /// Total count of planted probes for state desync tracking.
+    ProbeCount = 7,
 }
 
 #[contracterror]
@@ -193,7 +205,7 @@ pub enum Error {
     NotPlanted = 1,
     /// Batch is empty.
     EmptyBatch = 2,
-    /// Batch size exceeds maximum allowable limit.
+    /// Batch size exceeds the configured maximum (bounded by [`MAX_BATCH_PROBE_SIZE`]).
     BatchTooLarge = 3,
     /// Entry already planted (write-once invariant).
     DuplicateEntry = 4,
@@ -553,7 +565,7 @@ impl ArchivalProbe {
             .map(|c| c.max_batch_size)
             .unwrap_or(MAX_BATCH_PROBE_SIZE);
 
-        if len > limit || len != notes.len() {
+        if len > MAX_BATCH_PROBE_SIZE || len > limit || len != notes.len() {
             return Err(Error::BatchTooLarge);
         }
 
@@ -593,7 +605,7 @@ impl ArchivalProbe {
             .map(|c| c.max_batch_size)
             .unwrap_or(MAX_BATCH_PROBE_SIZE);
 
-        if len > limit {
+        if len > MAX_BATCH_PROBE_SIZE || len > limit {
             return Err(Error::BatchTooLarge);
         }
 
@@ -637,7 +649,7 @@ impl ArchivalProbe {
             .map(|c| c.max_batch_size)
             .unwrap_or(MAX_BATCH_PROBE_SIZE);
 
-        if len > limit {
+        if len > MAX_BATCH_PROBE_SIZE || len > limit {
             return Err(Error::BatchTooLarge);
         }
         if len != amounts.len() {
@@ -688,7 +700,7 @@ impl ArchivalProbe {
             .map(|c| c.max_batch_size)
             .unwrap_or(MAX_BATCH_PROBE_SIZE);
 
-        if len > limit {
+        if len > MAX_BATCH_PROBE_SIZE || len > limit {
             return Err(Error::BatchTooLarge);
         }
 
