@@ -2,11 +2,16 @@
 #
 # Dedicated fee-accrual subsystem for protocol and keeper fee accounting in Perpetua.
 # Tracks protocol fee accrual, keeper fee splits, and fee distribution balances
-# with defensive checked arithmetic, modularized error types, and custom error messages
-# for enhanced client observability.
+# with defensive checked arithmetic, modularized error types, custom error messages
+# for enhanced client observability, and granular role-based authorization to
+# prevent unauthorized configuration updates.
 #
+# Issue #385: feat(contracts/fee-accrual): add granular role-based authorization
+# to fee-accrual to prevent unauthorized configuration updates.
 # Issue #389: modularize error types and custom error messages in fee-accrual for enhanced
 # client observability.
+# Issue #392: test(contracts/fee-accrual): add fuzzing coverage for edge-case
+# timestamps in fee-accrual near u64 maximum boundary limits.
 #
 #   cargo build  --target wasm32v1-none --release
 #   cargo test
@@ -37,6 +42,7 @@ soroban-sdk = "27.0.6"
 
 [dev-dependencies]
 soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+proptest = "1"
 
 [profile.release]
 opt-level = "z"

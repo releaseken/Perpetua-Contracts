@@ -1,25 +1,16 @@
-//! Shared test harness for the `fee-accrual` contract.
+//! Shared test harness and utilities for the fee-accrual contract test suite.
 
-use soroban_sdk::testutils::{
-    storage::{Instance as _, Persistent as _},
-    Address as _, Ledger as _,
-};
-use soroban_sdk::{Address, Env, String};
+use soroban_sdk::testutils::{Address as _, Ledger as _};
+use soroban_sdk::{Address, Env};
 
-use crate::{DataKey, FeeAccrualContract, FeeAccrualContractClient};
+use crate::{FeeAccrual, FeeAccrualClient, FeeConfig};
 
-/// Non-zero starting ledger timestamp.
+/// Default nominal timestamp for test setup (Nov 2023 epoch).
 pub const T0: u64 = 1_700_000_000;
-
-/// Default protocol fee: 200 bps (2.00%).
-pub const DEFAULT_PROTOCOL_FEE_BPS: u32 = 200;
-
-/// Default keeper split: 2_500 bps (25.00% of total fee).
-pub const DEFAULT_KEEPER_SPLIT_BPS: u32 = 2_500;
 
 pub struct Harness<'a> {
     pub env: Env,
-    pub client: FeeAccrualContractClient<'a>,
+    pub client: FeeAccrualClient<'a>,
     pub contract_id: Address,
     pub admin: Address,
     pub fee_admin: Address,
@@ -31,12 +22,16 @@ pub struct Harness<'a> {
 
 impl<'a> Harness<'a> {
     pub fn new() -> Harness<'a> {
+        Self::with_params(100, 2000) // 1% protocol fee, 20% keeper split
+    }
+
+    pub fn with_params(protocol_fee_bps: u32, keeper_split_bps: u32) -> Harness<'a> {
         let env = Env::default();
         env.mock_all_auths();
         env.ledger().set_timestamp(T0);
 
-        let contract_id = env.register(FeeAccrualContract, ());
-        let client = FeeAccrualContractClient::new(&env, &contract_id);
+        let contract_id = env.register(FeeAccrual, ());
+        let client = FeeAccrualClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let fee_admin = Address::generate(&env);
@@ -51,8 +46,8 @@ impl<'a> Harness<'a> {
             &fee_collector,
             &emergency_admin,
             &fee_recipient,
-            &DEFAULT_PROTOCOL_FEE_BPS,
-            &DEFAULT_KEEPER_SPLIT_BPS,
+            &protocol_fee_bps,
+            &keeper_split_bps,
         );
 
         Harness {
@@ -68,72 +63,33 @@ impl<'a> Harness<'a> {
         }
     }
 
-    /// Advance both ledger wall-clock timestamp and sequence number consistently.
+    /// Advance ledger timestamp and sequence number consistently.
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
         self.env
             .ledger()
             .set_timestamp(info.timestamp.saturating_add(seconds));
-        let ledgers = ((seconds.saturating_add(4)) / 5) as u32;
+        let ledgers = ((seconds.saturating_add(4)) / 5).min(u32::MAX as u64) as u32;
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));
     }
 
-    /// Advance ledger sequence directly by `ledgers`.
-    pub fn advance_ledgers(&self, ledgers: u32) {
-        let info = self.env.ledger().get();
-        self.env
-            .ledger()
-            .set_sequence_number(info.sequence_number.saturating_add(ledgers));
-        self.env
-            .ledger()
-            .set_timestamp(info.timestamp.saturating_add(ledgers as u64 * 5));
+    /// Warp ledger timestamp directly to an absolute timestamp.
+    pub fn warp_to(&self, timestamp: u64) {
+        let current = self.env.ledger().timestamp();
+        if timestamp >= current {
+            self.advance(timestamp - current);
+        } else {
+            self.env.ledger().set_timestamp(timestamp);
+        }
     }
 
-    /// True if persistent `DataKey::StreamFee(stream_id)` exists in contract storage.
-    pub fn entry_exists(&self, stream_id: u64) -> bool {
-        self.env.as_contract(&self.contract_id, || {
-            self.env
-                .storage()
-                .persistent()
-                .has(&DataKey::StreamFee(stream_id))
-        })
+    pub fn now(&self) -> u64 {
+        self.env.ledger().timestamp()
     }
 
-    /// Current remaining TTL in ledgers for `DataKey::StreamFee(stream_id)`.
-    pub fn ttl_of(&self, stream_id: u64) -> u32 {
-        self.env.as_contract(&self.contract_id, || {
-            self.env
-                .storage()
-                .persistent()
-                .get_ttl(&DataKey::StreamFee(stream_id))
-        })
-    }
-
-    /// Current remaining TTL in ledgers for the contract's instance storage.
-    pub fn instance_ttl(&self) -> u32 {
-        self.env.as_contract(&self.contract_id, || {
-            self.env.storage().instance().get_ttl()
-        })
-    }
-
-    /// Maximum allowable TTL on the current network configuration.
-    pub fn max_ttl(&self) -> u32 {
-        self.env
-            .as_contract(&self.contract_id, || self.env.storage().max_ttl())
-    }
-
-    /// Target persistent TTL floor clamped to `max_ttl()`.
-    pub fn expected_entry_ttl(&self) -> u32 {
-        crate::storage::MIN_ENTRY_TTL_LEDGERS.min(self.max_ttl())
-    }
-
-    /// All-zero Stellar address for negative validation tests.
-    pub fn zero_address(&self) -> Address {
-        Address::from_string(&String::from_str(
-            &self.env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        ))
+    pub fn config(&self) -> FeeConfig {
+        self.client.get_config()
     }
 }
