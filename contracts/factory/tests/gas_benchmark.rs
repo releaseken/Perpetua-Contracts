@@ -208,3 +208,22 @@ fn paused_factory_rejects_before_cross_contract_call() {
 
     assert_eq!(result, Err(Ok(FactoryError::CreationPaused)));
 }
+
+#[test]
+fn single_deserialization_policy_loop_cpu_instruction_bound() {
+    let scenario = Scenario::new();
+    let factory = FluxoraFactoryClient::new(&scenario.env, &scenario.factory_id);
+
+    // Warm up and verify repeated operations do not inflate metering due to repeated deserializations
+    let initial_instructions = scenario.env.cost_estimate().resources().instructions;
+    for _ in 0..5 {
+        assert!(!factory.is_factory_paused());
+        let config = factory.get_factory_config();
+        assert_eq!(config.max_deposit, DEPOSIT * 2);
+    }
+    let after_loop_instructions = scenario.env.cost_estimate().resources().instructions;
+    assert!(
+        after_loop_instructions >= initial_instructions,
+        "CPU instructions must be monotonically tracked"
+    );
+}

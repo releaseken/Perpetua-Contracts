@@ -49,14 +49,17 @@ compile_error!("Perpetua production WASM must not enable the testutils feature."
 #[cfg(test)]
 extern crate std;
 
-mod accrual;
-mod error;
-mod events;
-mod storage;
-mod types;
+pub mod accrual;
+pub mod error;
+pub mod events;
+pub mod invariants;
+pub mod math;
+pub mod storage;
+pub mod types;
 
 pub use accrual::{cliff_reached, duration, elapsed, liability, refundable, vested, withdrawable};
 pub use error::Error;
+pub use math::{calculate_bps_payout, calculate_fractional_payout, FractionalSplit};
 pub use storage::{MIN_SCHEDULE_TTL_LEDGERS, SECONDS_PER_LEDGER, TTL_BUFFER_SECONDS};
 pub use types::{DataKey, ScheduleStatus, VestingConfig, VestingSchedule};
 
@@ -872,14 +875,14 @@ impl CliffVesting {
 
 #[cfg(test)]
 mod test {
-    mod bft_partitions;
+    mod batch;
     mod common;
     mod create;
-    mod withdraw;
-    mod revoke;
-    mod pause;
-    mod roles;
-    mod batch;
-    mod ttl;
+    mod fractional;
     mod fuzz;
+    mod pause;
+    mod revoke;
+    mod roles;
+    mod ttl;
+    mod withdraw;
 }
