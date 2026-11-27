@@ -47,7 +47,7 @@
 //!
 //! ## What it deliberately does not do
 //!
-//! No auth, no tokens, no value of any kind. It holds canary and batch
+//! No auth, no tokens, no value of any kind. It holds a single symbol or batch
 //! probe entries. If it archives and is never restored, nothing is lost. Do not
 //! build on it, and do not deploy it to mainnet.
 //!
@@ -66,26 +66,15 @@
 //!
 //! and for the live-network round trip, `script/archival-canary.sh`.
 
-pub mod error;
 pub mod invariants;
 
 #[cfg(test)]
 mod test;
 
-pub use error::{ErrorCategory, ProbeError};
-/// Backward-compatibility alias for Error.
-pub type Error = ProbeError;
-
-use soroban_sdk::{contract, contractimpl, contracttype, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Env, Symbol, Vec};
 
 /// Maximum batch probe size allowed to prevent host metering exhaustion.
 pub const MAX_BATCH_PROBE_SIZE: u32 = 32;
-
-/// Threshold in ledgers (~7 days at 5s/ledger) before TTL extension triggers.
-pub const LIFETIME_THRESHOLD_LEDGERS: u32 = 120_960;
-
-/// Target bump amount in ledgers (~30 days at 5s/ledger) for resilient entries.
-pub const BUMP_AMOUNT_LEDGERS: u32 = 518_400;
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -102,10 +91,22 @@ pub enum Key {
     Canary = 0,
     /// Multi-probe partitioned canaries identified by sequence id.
     Probe(u32) = 1,
-    /// Execution guard in instance storage to prevent re-entrancy.
-    Executing = 2,
-    /// Total count of planted probes for state desync tracking.
-    ProbeCount = 3,
+}
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum Error {
+    /// The canary has never been planted.
+    NotPlanted = 1,
+    /// Batch is empty.
+    EmptyBatch = 2,
+    /// Batch size exceeds [`MAX_BATCH_PROBE_SIZE`].
+    BatchTooLarge = 3,
+    /// Entry already planted (write-once invariant).
+    DuplicateEntry = 4,
+    /// Arithmetic overflow in loop counter or calculation.
+    ArithmeticOverflow = 5,
 }
 
 #[contract]
@@ -167,77 +168,44 @@ impl ArchivalProbe {
         env.storage().persistent().has(&Key::Canary)
     }
 
-    /// Plant a keyed probe entry once under a simulated partition id with re-entrancy
-    /// lock, state-desync guard, and automated instance lifetime refresh.
+    /// Plant a keyed probe entry once under a simulated partition id.
     /// Idempotent: first-write-wins to prevent reset during retry cascades.
-    pub fn plant_probe(env: Env, id: u32, note: Symbol) -> Result<(), ProbeError> {
-        invariants::acquire_executing(&env)?;
-        let result = Self::plant_probe_inner(&env, id, note);
-        invariants::release_executing(&env);
-        invariants::extend_instance_lifetime(&env);
-        result
-    }
-
-    fn plant_probe_inner(env: &Env, id: u32, note: Symbol) -> Result<(), ProbeError> {
-        let count_before = Self::load_probe_count(env);
-        let mut planted_delta: u32 = 0;
+    pub fn plant_probe(env: Env, id: u32, note: Symbol) {
         let key = Key::Probe(id);
-
-        if !env.storage().persistent().has(&key) {
-            let record = ProbeRecord {
-                note,
-                planted_at: env.ledger().sequence(),
-            };
-            env.storage().persistent().set(&key, &record);
-            let count_after = count_before
-                .checked_add(1)
-                .ok_or(ProbeError::ArithmeticOverflow)?;
-            env.storage().instance().set(&Key::ProbeCount, &count_after);
-            planted_delta = 1;
+        if env.storage().persistent().has(&key) {
+            return;
         }
-
-        let count_final = Self::load_probe_count(env);
-        invariants::assert_state_sync(count_before, count_final, planted_delta)?;
-        Ok(())
+        let record = ProbeRecord {
+            note,
+            planted_at: env.ledger().sequence(),
+        };
+        env.storage().persistent().set(&key, &record);
     }
 
     /// Read a specific keyed probe entry.
-    pub fn read_probe(env: Env, id: u32) -> Result<ProbeRecord, ProbeError> {
+    pub fn read_probe(env: Env, id: u32) -> Result<ProbeRecord, Error> {
         env.storage()
             .persistent()
             .get(&Key::Probe(id))
-            .ok_or(ProbeError::NotPlanted)
+            .ok_or(Error::NotPlanted)
     }
 
-    /// Batch plant multiple probe entries atomically with strict bounds checking,
-    /// re-entrancy protection, state-desync verification, and automated instance refresh.
-    ///
-    /// Consolidates multi-key probes into a single execution frame while guaranteeing
-    /// that total probe count advances by exactly the number of newly planted entries.
-    pub fn batch_plant(env: Env, ids: Vec<u32>, notes: Vec<Symbol>) -> Result<u32, ProbeError> {
-        invariants::acquire_executing(&env)?;
-        let result = Self::batch_plant_inner(&env, ids, notes);
-        invariants::release_executing(&env);
-        invariants::extend_instance_lifetime(&env);
-        result
-    }
-
-    fn batch_plant_inner(env: &Env, ids: Vec<u32>, notes: Vec<Symbol>) -> Result<u32, ProbeError> {
+    /// Batch plant multiple probe entries atomically with bounds checking.
+    pub fn batch_plant(env: Env, ids: Vec<u32>, notes: Vec<Symbol>) -> Result<u32, Error> {
         let len = ids.len();
         if len == 0 {
-            return Err(ProbeError::EmptyBatch);
+            return Err(Error::EmptyBatch);
         }
         if len > MAX_BATCH_PROBE_SIZE || len != notes.len() {
-            return Err(ProbeError::BatchTooLarge);
+            return Err(Error::BatchTooLarge);
         }
 
-        let count_before = Self::load_probe_count(env);
         let mut planted_count: u32 = 0;
         let seq = env.ledger().sequence();
 
         for i in 0..len {
-            let id = ids.get(i).ok_or(ProbeError::ArithmeticOverflow)?;
-            let note = notes.get(i).ok_or(ProbeError::ArithmeticOverflow)?;
+            let id = ids.get(i).ok_or(Error::ArithmeticOverflow)?;
+            let note = notes.get(i).ok_or(Error::ArithmeticOverflow)?;
             let key = Key::Probe(id);
 
             if !env.storage().persistent().has(&key) {
@@ -248,138 +216,34 @@ impl ArchivalProbe {
                 env.storage().persistent().set(&key, &record);
                 planted_count = planted_count
                     .checked_add(1)
-                    .ok_or(ProbeError::ArithmeticOverflow)?;
+                    .ok_or(Error::ArithmeticOverflow)?;
             }
         }
-
-        let new_count = count_before
-            .checked_add(planted_count)
-            .ok_or(ProbeError::ArithmeticOverflow)?;
-        env.storage().instance().set(&Key::ProbeCount, &new_count);
-
-        let count_final = Self::load_probe_count(env);
-        invariants::assert_state_sync(count_before, count_final, planted_count)?;
 
         Ok(planted_count)
     }
 
     /// Batch read probe records in a single optimized pass without redundant lookups.
-    pub fn batch_read(env: Env, ids: Vec<u32>) -> Result<Vec<ProbeRecord>, ProbeError> {
+    pub fn batch_read(env: Env, ids: Vec<u32>) -> Result<Vec<ProbeRecord>, Error> {
         let len = ids.len();
         if len == 0 {
-            return Err(ProbeError::EmptyBatch);
+            return Err(Error::EmptyBatch);
         }
         if len > MAX_BATCH_PROBE_SIZE {
-            return Err(ProbeError::BatchTooLarge);
+            return Err(Error::BatchTooLarge);
         }
 
         let mut records = Vec::new(&env);
         for i in 0..len {
-            let id = ids.get(i).ok_or(ProbeError::ArithmeticOverflow)?;
+            let id = ids.get(i).ok_or(Error::ArithmeticOverflow)?;
             let record: ProbeRecord = env
                 .storage()
                 .persistent()
                 .get(&Key::Probe(id))
-                .ok_or(ProbeError::NotPlanted)?;
+                .ok_or(Error::NotPlanted)?;
             records.push_back(record);
         }
 
         Ok(records)
-    }
-
-    /// Extend the persistent lifetime of an individual keyed probe entry.
-    ///
-    /// Provides automated archival resilience for designated probe keys requiring
-    /// prolonged survival across observation epochs. Unknown or archived IDs
-    /// return [`ProbeError::NotPlanted`].
-    pub fn extend_probe_lifetime(env: Env, id: u32) -> Result<(), ProbeError> {
-        invariants::acquire_executing(&env)?;
-        let key = Key::Probe(id);
-        if !env.storage().persistent().has(&key) {
-            invariants::release_executing(&env);
-            return Err(ProbeError::NotPlanted);
-        }
-
-        invariants::extend_persistent_entry(&env, &key);
-        invariants::release_executing(&env);
-        invariants::extend_instance_lifetime(&env);
-        Ok(())
-    }
-
-    /// Batch extend the persistent entry lifetime of multiple probe entries in one sweep.
-    ///
-    /// Unknown or unplanted probe IDs are skipped gracefully. Returns the count of
-    /// successfully refreshed entries.
-    ///
-    /// # Errors
-    /// * [`ProbeError::EmptyBatch`] — empty vector provided.
-    /// * [`ProbeError::BatchTooLarge`] — vector size exceeds [`MAX_BATCH_PROBE_SIZE`].
-    pub fn batch_extend_probe_lifetime(env: Env, ids: Vec<u32>) -> Result<u32, ProbeError> {
-        let len = ids.len();
-        if len == 0 {
-            return Err(ProbeError::EmptyBatch);
-        }
-        if len > MAX_BATCH_PROBE_SIZE {
-            return Err(ProbeError::BatchTooLarge);
-        }
-
-        invariants::acquire_executing(&env)?;
-        let mut extended_count: u32 = 0;
-
-        for i in 0..len {
-            let id = match ids.get(i) {
-                Some(val) => val,
-                None => {
-                    invariants::release_executing(&env);
-                    return Err(ProbeError::ArithmeticOverflow);
-                }
-            };
-            let key = Key::Probe(id);
-            if env.storage().persistent().has(&key) {
-                invariants::extend_persistent_entry(&env, &key);
-                extended_count = match extended_count.checked_add(1) {
-                    Some(val) => val,
-                    None => {
-                        invariants::release_executing(&env);
-                        return Err(ProbeError::ArithmeticOverflow);
-                    }
-                };
-            }
-        }
-
-        invariants::release_executing(&env);
-        invariants::extend_instance_lifetime(&env);
-        Ok(extended_count)
-    }
-
-    /// Returns the total number of distinct probe items planted across lifetime.
-    pub fn probe_count(env: Env) -> u32 {
-        Self::load_probe_count(&env)
-    }
-
-    /// Returns whether the contract is currently executing a mutating operation.
-    pub fn is_executing(env: Env) -> bool {
-        invariants::is_executing(&env)
-    }
-
-    /// Return human-readable error description for a numeric error discriminant.
-    pub fn error_message(env: Env, discriminant: u32) -> String {
-        let msg = ProbeError::from_discriminant(discriminant)
-            .map(|e| e.message())
-            .unwrap_or("");
-        String::from_str(&env, msg)
-    }
-
-    /// Return the single-character group letter ('A' through 'E') for an error discriminant.
-    ///
-    /// Returns 0 (NUL byte) if the discriminant is unrecognized.
-    pub fn error_group(_env: Env, discriminant: u32) -> u32 {
-        ProbeError::from_discriminant(discriminant)
-            .map(|e| e.group() as u32)
-            .unwrap_or(0)
-    }
-
-    fn load_probe_count(env: &Env) -> u32 {
-        env.storage().instance().get(&Key::ProbeCount).unwrap_or(0)
     }
 }

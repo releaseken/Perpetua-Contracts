@@ -9,9 +9,9 @@
 //! |:---|:---|:---|:---|
 //! | **Group A** | Lifecycle / Init | `AlreadyInitialized (0)`, `NotInitialized (1)` | Contract initialization bounds |
 //! | **Group B** | Token Entity | `AlreadyMinted (2)`, `TokenNotFound (3)` | Token state & existence |
-//! | **Group C** | Authorization | `NotOwner (4)`, `Unauthorized (11)` | Ownership & auth gating |
+//! | **Group C** | Authorization | `NotOwner (4)`, `Unauthorized (11)`, `InvalidRoleAddress (17)`, `NoPendingAdmin (18)` | Ownership, role, & auth gating |
 //! | **Group D** | Cross-Contract | `StreamRejected (5)`, `StreamCallFailed (12)` | Invocations against stream contract |
-//! | **Group E** | Batch / Protocol | `EmptyBatch (6)`, `BatchTooLarge (7)`, `DuplicateTokenId (8)`, `MalformedTokenId (9)` | Batch parameter validation |
+//! | **Group E** | Batch / Protocol | `EmptyBatch (6)`, `BatchTooLarge (7)`, `DuplicateTokenId (8)`, `MalformedTokenId (9)`, `MintPaused (19)` | Batch parameter & protocol state validation |
 //! | **Group F** | Arithmetic | `ArithmeticOverflow (10)`, `Overflow (16)` | Checked math overflows |
 //! | **Group G** | Execution Safety | `ReentrancyGuard (13)`, `InvariantViolation (14)`, `RepeatedTransfer (15)` | Re-entrancy and invariant guards |
 //!
@@ -72,6 +72,12 @@ pub enum Error {
     RepeatedTransfer = 15,
     /// Checked supply or balance arithmetic overflowed.
     Overflow = 16,
+    /// A role, stream, or contract address is forbidden (zero address or self).
+    InvalidRoleAddress = 17,
+    /// No pending admin nomination exists to accept.
+    NoPendingAdmin = 18,
+    /// Minting is paused by the manager.
+    MintPaused = 19,
 }
 
 impl Error {
@@ -81,12 +87,16 @@ impl Error {
         match self {
             Self::AlreadyInitialized | Self::NotInitialized => 'A',
             Self::AlreadyMinted | Self::TokenNotFound => 'B',
-            Self::NotOwner | Self::Unauthorized => 'C',
+            Self::NotOwner
+            | Self::Unauthorized
+            | Self::InvalidRoleAddress
+            | Self::NoPendingAdmin => 'C',
             Self::StreamRejected | Self::StreamCallFailed => 'D',
             Self::EmptyBatch
             | Self::BatchTooLarge
             | Self::DuplicateTokenId
-            | Self::MalformedTokenId => 'E',
+            | Self::MalformedTokenId
+            | Self::MintPaused => 'E',
             Self::ArithmeticOverflow | Self::Overflow => 'F',
             Self::ReentrancyGuard | Self::InvariantViolation | Self::RepeatedTransfer => 'G',
         }
@@ -114,6 +124,9 @@ impl Error {
             Self::InvariantViolation => "stream-NFT ownership or balance invariant was violated",
             Self::RepeatedTransfer => "self-transfer or repeated transfer was rejected",
             Self::Overflow => "checked supply or balance arithmetic overflowed",
+            Self::InvalidRoleAddress => "role or contract address is forbidden (zero or self)",
+            Self::NoPendingAdmin => "no pending admin nomination exists to accept",
+            Self::MintPaused => "minting is currently paused by the manager",
         }
     }
 
@@ -134,6 +147,7 @@ impl Error {
                 | Self::MalformedTokenId
                 | Self::TokenNotFound
                 | Self::NotOwner
-        )
+                | Self::InvalidRoleAddress
+            )
     }
 }
