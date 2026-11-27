@@ -4,7 +4,7 @@ use soroban_sdk::{contracttype, Address};
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DataKey {
-    /// Instance storage: contract configuration record with role separation.
+    /// Instance storage: contract configuration record.
     Config,
     /// Instance storage: proposed next admin for two-step rotation.
     PendingAdmin,
@@ -16,32 +16,18 @@ pub enum DataKey {
     TotalKeeperFees,
 }
 
-/// Global fee and role configuration.
-///
-/// Implements granular role-based authorization:
-/// - `admin`: Manages admin rotation and role assignments.
-/// - `fee_admin`: Configures protocol fee bps, keeper split bps, and fee recipient.
-/// - `fee_collector`: Authorized to trigger fee accruals and distributions from stream subsystem.
-/// - `emergency_admin`: Authorized to pause/halt fee operations or sweep in emergency.
+/// Global fee configuration.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeConfig {
-    /// Administrative authority (governs roles and upgrades).
+    /// Administrative authority.
     pub admin: Address,
-    /// Parameter and configuration manager authority.
-    pub fee_admin: Address,
-    /// Authorized subsystem caller for fee accrual updates.
-    pub fee_collector: Address,
-    /// Emergency administration authority.
-    pub emergency_admin: Address,
     /// Recipient address for protocol fee withdrawals.
     pub fee_recipient: Address,
     /// Protocol fee basis points (e.g. 100 = 1.00%, max 10_000).
     pub protocol_fee_bps: u32,
     /// Keeper fee split basis points out of protocol fee (e.g. 2_000 = 20%).
     pub keeper_split_bps: u32,
-    /// Emergency pause switch for accrual.
-    pub paused: bool,
 }
 
 /// Fee accrual details for a specific stream.

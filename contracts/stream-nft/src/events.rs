@@ -1,6 +1,6 @@
-//! Event definitions for the stream-NFT contract.
+//! Events emitted by the Stream NFT contract.
 
-use soroban_sdk::{contractevent, Address, Env};
+use soroban_sdk::{contractevent, symbol_short, Address, Env};
 
 /// A new stream NFT token was minted.
 #[contractevent]
@@ -53,4 +53,16 @@ pub fn ttl_extended(env: &Env, stream_id: u64, extended_to_ledgers: u32) {
         extended_to_ledgers,
     }
     .publish(env);
+}
+
+/// Emitted when a fractional or full withdrawal is executed via the NFT wrapper.
+pub fn fractional_withdrawn(
+    env: &Env,
+    stream_id: u64,
+    recipient: &Address,
+    amount: i128,
+    remainder: i128,
+) {
+    let topics = (symbol_short!("withdrawn"), stream_id, recipient.clone());
+    env.events().publish(topics, (amount, remainder));
 }
