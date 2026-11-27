@@ -40,10 +40,11 @@ fn sdk_string_to_rust(s: String) -> std::string::String {
     std::string::String::from_utf8(buf).expect("soroban String must be valid UTF-8")
 }
 
-const ALL_VARIANTS: [FactoryError; 21] = [
+const ALL_VARIANTS: [FactoryError; 22] = [
     FactoryError::NotInitialized,
     FactoryError::AlreadyInitialized,
     FactoryError::Unauthorized,
+    FactoryError::UnauthorizedImplementation,
     FactoryError::AllowlistDenied,
     FactoryError::InvalidNewAdmin,
     FactoryError::NoPendingAdmin,
@@ -124,6 +125,11 @@ fn factory_error_categories_and_groups_match_specification() {
         ErrorCategory::Authorization
     );
     assert_eq!(FactoryError::Unauthorized.group(), 'B');
+    assert_eq!(
+        FactoryError::UnauthorizedImplementation.category(),
+        ErrorCategory::Authorization
+    );
+    assert_eq!(FactoryError::UnauthorizedImplementation.group(), 'B');
     assert_eq!(
         FactoryError::InvalidNewAdmin.category(),
         ErrorCategory::Authorization
@@ -269,7 +275,10 @@ fn discriminant_round_trip() {
 
     // Invalid discriminants return None
     assert_eq!(FactoryError::from_discriminant(0), None);
-    assert_eq!(FactoryError::from_discriminant(22), None);
+    assert_eq!(
+        FactoryError::from_discriminant(22),
+        Some(FactoryError::UnauthorizedImplementation)
+    );
     assert_eq!(FactoryError::from_discriminant(999), None);
 }
 
@@ -321,8 +330,8 @@ proptest! {
                 prop_assert!(group >= 'A' && group <= 'E');
             }
             None => {
-                // Must be outside valid discriminant set: 1..=21
-                prop_assert!(discriminant == 0 || discriminant > 21);
+                // Must be outside valid discriminant set: 1..=22
+                prop_assert!(discriminant == 0 || discriminant > 22);
             }
         }
     }

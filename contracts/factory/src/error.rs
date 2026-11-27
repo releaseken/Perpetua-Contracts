@@ -77,6 +77,8 @@ pub enum FactoryError {
     // -----------------------------------------------------------------------
     /// Caller is not the admin.
     Unauthorized = 3,
+    /// The requested implementation hash is not the governance-approved hash.
+    UnauthorizedImplementation = 22,
     /// The proposed admin cannot be set: it is the zero address or the factory
     /// contract itself, either of which would permanently lock the factory.
     InvalidNewAdmin = 5,
@@ -138,6 +140,9 @@ impl FactoryError {
             FactoryError::NotInitialized => "factory contract has not been initialized",
             FactoryError::AlreadyInitialized => "factory contract is already initialized",
             FactoryError::Unauthorized => "caller is not authorized as factory admin",
+            FactoryError::UnauthorizedImplementation => {
+                "implementation wasm hash is not approved by governance"
+            }
             FactoryError::AllowlistDenied => "recipient address is not on the approved allowlist",
             FactoryError::InvalidNewAdmin => {
                 "proposed admin cannot be the zero address or the factory contract itself"
@@ -188,6 +193,7 @@ impl FactoryError {
                 ErrorCategory::Lifecycle
             }
             FactoryError::Unauthorized
+            | FactoryError::UnauthorizedImplementation
             | FactoryError::InvalidNewAdmin
             | FactoryError::NoPendingAdmin => ErrorCategory::Authorization,
             FactoryError::AllowlistDenied
@@ -238,6 +244,7 @@ impl FactoryError {
             19 => Some(FactoryError::InvalidCliff),
             20 => Some(FactoryError::ReentrancyGuard),
             21 => Some(FactoryError::InvariantViolation),
+            22 => Some(FactoryError::UnauthorizedImplementation),
             _ => None,
         }
     }

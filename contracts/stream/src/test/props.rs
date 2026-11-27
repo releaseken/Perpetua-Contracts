@@ -224,3 +224,24 @@ proptest! {
         prop_assert_eq!(accrual::refundable(&s, end).unwrap(), 0);
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10_000))]
+
+    /// A claim before the cliff is always zero, regardless of schedule inputs.
+    #[test]
+    fn cliff_claimable_is_zero_before_cliff_for_random_schedules(
+        start in 0u64..=u64::MAX - MAX_DURATION,
+        duration in 1u64..=MAX_DURATION,
+        cliff_raw in 1u64..=MAX_DURATION,
+        deposited in 1i128..=i128::MAX,
+    ) {
+        let cliff_offset = cliff_raw.min(duration);
+        let stream = stream_of(deposited, start, duration, cliff_offset);
+        let current_timestamp = start + cliff_offset - 1;
+        let claimable_amount = accrual::withdrawable(&stream, current_timestamp).unwrap();
+
+        prop_assert!(current_timestamp < stream.cliff_time);
+        prop_assert_eq!(claimable_amount, 0);
+    }
+}
