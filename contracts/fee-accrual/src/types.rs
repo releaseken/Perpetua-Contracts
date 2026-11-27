@@ -73,3 +73,24 @@ pub struct BatchAccrueItem {
     pub stream_id: u64,
     pub amount: i128,
 }
+
+/// Coalesced summary returned by batch fee operations (Issue #391).
+///
+/// Allows callers (such as the stream contract or keeper routers) to receive
+/// the entire batch fee settlement or accrual breakdown in a single
+/// cross-contract return payload, eliminating O(N) sub-invocations during
+/// high-frequency batch claims.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchClaimSummary {
+    /// Number of streams processed in the batch.
+    pub streams_processed: u32,
+    /// Aggregate gross amount across all processed streams.
+    pub total_gross_amount: i128,
+    /// Aggregate protocol fee accrued or claimed across the batch.
+    pub total_protocol_fee: i128,
+    /// Aggregate keeper fee accrued or claimed across the batch.
+    pub total_keeper_fee: i128,
+    /// Aggregate net amount remaining after fee deduction.
+    pub total_net_amount: i128,
+}

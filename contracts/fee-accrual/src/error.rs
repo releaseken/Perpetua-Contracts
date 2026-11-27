@@ -3,7 +3,7 @@ use soroban_sdk::contracterror;
 /// Every failure mode in the fee-accrual contract, as a typed, client-observable
 /// error.
 ///
-/// # Design rationale (issue #389)
+/// # Design rationale (issue #385, issue #389)
 ///
 /// Errors are split into five semantic groups so client tooling and SDKs can
 /// branch on failure domains without matching every individual discriminant:
@@ -11,20 +11,12 @@ use soroban_sdk::contracterror;
 /// | Group | Discriminants | Category | Meaning |
 /// |-------|--------------|----------|---------|
 /// | Initialization | 1–2 | Group A | Contract lifecycle |
-/// | Authorization | 3–6 | Group B | Caller identity & admin permissions |
-/// | Validation | 7–10 | Group C | Fee configuration and parameter bounds |
-/// | Accounting | 11–14 | Group D | Accrual, claim, and balance states |
+/// | Authorization | 3–6, 19–20 | Group B | Caller identity & role permissions |
+/// | Validation | 7–10, 21 | Group C | Fee configuration and parameter bounds |
+/// | Accounting | 11–14, 22 | Group D | Accrual, claim, and balance states |
 /// | Arithmetic / Limits | 15–18 | Group E | Arithmetic guards and batch bounds |
 ///
-/// Discriminants are part of the public ABI. Never renumber an existing
-/// variant; only append new ones at the end.
-///
-/// # Custom messages
-///
-/// Each variant carries a doc-comment that is both human-readable and
-/// machine-extractable via ABI tooling. The `impl FeeError` block exposes
-/// a `message()` method so clients decoding a numeric `u32` discriminant from
-/// the ledger can recover the canonical description without embedding Rust docs.
+/// Discriminants are part of the public ABI.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -85,14 +77,32 @@ pub enum FeeError {
     BatchTooLarge = 17,
     /// An internal accounting invariant was violated; transaction aborted.
     InvariantViolation = 18,
+
+    // -----------------------------------------------------------------------
+    // Role Authorization Additions (Issue #385)
+    // -----------------------------------------------------------------------
+    /// Caller is not authorized for the requested role-gated operation.
+    UnauthorizedRole = 19,
+    /// Proposed role address is invalid (zero address or contract itself).
+    InvalidRoleAddress = 20,
+    /// Contract is currently paused by emergency admin.
+    ContractPaused = 21,
+    /// Contract is already unpaused.
+    ContractNotPaused = 22,
+
+    // -----------------------------------------------------------------------
+    // Cross-Contract Batch Claims & Coalescing (Issue #391)
+    // -----------------------------------------------------------------------
+    /// Batch contains duplicate stream IDs; rejected to prevent double-counting.
+    DuplicateStreamId = 23,
+    /// Parallel vectors passed to a batch operation have mismatched lengths.
+    LengthMismatch = 24,
+    /// Gross accrual amount must be strictly positive (> 0).
+    InvalidAmount = 25,
 }
 
 impl FeeError {
     /// Canonical human-readable message for each error variant.
-    ///
-    /// Intended for client SDKs that decode the numeric discriminant from the
-    /// ledger and want to surface a descriptive string without embedding Rust
-    /// docs.
     pub const fn message(self) -> &'static str {
         match self {
             FeeError::NotInitialized => "contract has not been initialized",
@@ -119,37 +129,49 @@ impl FeeError {
             FeeError::InvariantViolation => {
                 "post-condition invariant check failed; state desync detected"
             }
+            FeeError::UnauthorizedRole => "caller does not possess required role authorization",
+            FeeError::InvalidRoleAddress => {
+                "role address cannot be zero address or contract address"
+            }
+            FeeError::ContractPaused => "fee-accrual contract is currently paused",
+            FeeError::ContractNotPaused => "fee-accrual contract is not paused",
+            FeeError::DuplicateStreamId => {
+                "batch contains duplicate stream IDs; deduplicate before invoking"
+            }
+            FeeError::LengthMismatch => {
+                "parallel batch input vectors must have identical lengths"
+            }
+            FeeError::InvalidAmount => "fee accrual gross amount must be strictly positive",
         }
     }
 
     /// Return the discriminant group letter for coarse client-side branching.
-    ///
-    /// | Return | Meaning |
-    /// |--------|---------|
-    /// | `'A'`  | Initialization error |
-    /// | `'B'`  | Authorization error |
-    /// | `'C'`  | Validation error |
-    /// | `'D'`  | Accounting error |
-    /// | `'E'`  | Arithmetic / limits error |
     pub const fn group(self) -> char {
         match self {
             FeeError::NotInitialized | FeeError::AlreadyInitialized => 'A',
             FeeError::Unauthorized
             | FeeError::CallerNotAuthorized
             | FeeError::NoPendingAdmin
-            | FeeError::InvalidNewAdmin => 'B',
+            | FeeError::InvalidNewAdmin
+            | FeeError::UnauthorizedRole => 'B',
             FeeError::InvalidBpsRate
             | FeeError::InvalidFeeRecipient
             | FeeError::InvalidStreamId
-            | FeeError::InvalidTokenAddress => 'C',
+            | FeeError::InvalidTokenAddress
+            | FeeError::InvalidRoleAddress
+            | FeeError::InvalidAmount => 'C',
             FeeError::ZeroFeeAccrual
             | FeeError::InsufficientAccruedFees
             | FeeError::FeeRecordNotFound
-            | FeeError::FeeAlreadySettled => 'D',
+            | FeeError::FeeAlreadySettled
+            | FeeError::ContractPaused
+            | FeeError::ContractNotPaused => 'D',
             FeeError::ArithmeticOverflow
             | FeeError::EmptyBatch
             | FeeError::BatchTooLarge
-            | FeeError::InvariantViolation => 'E',
+            | FeeError::InvariantViolation
+            | FeeError::DuplicateStreamId
+            | FeeError::LengthMismatch => 'E',
         }
     }
 }
