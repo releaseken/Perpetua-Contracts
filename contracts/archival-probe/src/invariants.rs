@@ -45,11 +45,8 @@
 //!   All failure modes must be mapped to stable, typed error discriminants with canonical
 //!   human-readable messages and semantic error categories for client SDK observability.
 
-use crate::{
-    Key, ProbeError, ProbeRecord, BUMP_AMOUNT_LEDGERS, LIFETIME_THRESHOLD_LEDGERS,
-    MAX_BATCH_PROBE_SIZE,
-};
-use soroban_sdk::{Env, Symbol};
+use crate::{ProbeRecord, MAX_BATCH_PROBE_SIZE};
+use soroban_sdk::Symbol;
 
 /// Verify that a batch size does not exceed the allowed threshold.
 #[inline(always)]

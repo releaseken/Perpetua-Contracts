@@ -23,6 +23,21 @@
 //! 4. **Batch Ledger Footprint**: Batch operations are bounded by [`MAX_BATCH_SIZE`] (32 items)
 //!    to prevent host CPU and ledger footprint metering exhaustion.
 //!
+//! ## Issue #386 — Minimize Soroban Host CPU Instructions by Optimizing Loop Deserialization
+//!
+//! Batch operations preserve the low-metering execution model while still enforcing the
+//! Issue #388 guards and invariants:
+//!
+//! 1. **Single-Pass Storage Retrieval & Memory Caching**: Each stream record is read once with
+//!    a single storage `get()` and written back once; no redundant `has()` probes are emitted.
+//! 2. **Avoiding Redundant In-Loop Deserialization**: Configuration and global fee totals are
+//!    deserialized once before the loop, and scalar `stream_id`/`amount` values are kept in
+//!    local registers throughout the batch.
+//! 3. **Batched State Commit**: Global protocol and keeper fee aggregates are accumulated with
+//!    checked arithmetic in memory and committed to instance storage exactly once at the end.
+//! 4. **Defensive Bounds & Deduplication**: Batches are bounded by [`MAX_BATCH_SIZE`] and
+//!    duplicate stream IDs are rejected during pre-flight validation.
+//!
 //! ## Granular Role-based Authorization (Issue #385)
 //!
 //! - `admin`: Administrative authority (governs roles, admin rotation).
@@ -61,7 +76,7 @@ pub use types::{
 };
 
 use soroban_sdk::{
-    contract, contractimpl, Address, Env, Symbol, Vec,
+    contract, contractimpl, Address, Env, String, Symbol, Vec,
 };
 
 #[contract]
@@ -281,14 +296,96 @@ impl FeeAccrual {
         }
         invariants::assert_batch_bounds(items.len())?;
 
+        let len = items.len();
+        for i in 0..len {
+            let item_i = items.get(i).ok_or(FeeError::EmptyBatch)?;
+            if item_i.stream_id == 0 {
+                return Err(FeeError::InvalidStreamId);
+            }
+            if item_i.amount <= 0 {
+                return Err(FeeError::ArithmeticOverflow);
+            }
+            for j in (i + 1)..len {
+                let item_j = items.get(j).ok_or(FeeError::EmptyBatch)?;
+                if item_i.stream_id == item_j.stream_id {
+                    return Err(FeeError::DuplicateStreamId);
+                }
+            }
+        }
+
+        let proto_bps = config.protocol_fee_bps;
+        let keeper_bps = config.keeper_split_bps;
         let mut total_batch_fees: i128 = 0;
-        for item in items.iter() {
-            let breakdown =
-                Self::accrue_fee_inner(env, caller, item.stream_id, item.amount)?;
+        let mut cumulative_proto_fee: i128 = 0;
+        let mut cumulative_keeper_fee: i128 = 0;
+
+        for i in 0..len {
+            let item = items.get(i).ok_or(FeeError::EmptyBatch)?;
+            let stream_id = item.stream_id;
+            let gross_amount = item.amount;
+
+            let breakdown = compute_fee_breakdown(gross_amount, proto_bps, keeper_bps)?;
+            invariants::assert_breakdown_conservation(&breakdown)?;
+
+            let mut record = storage::get_stream_fee(env, stream_id).unwrap_or(StreamFeeRecord {
+                stream_id,
+                total_processed: 0,
+                protocol_fee_accrued: 0,
+                keeper_fee_accrued: 0,
+                protocol_fee_claimed: 0,
+                keeper_fee_claimed: 0,
+                is_settled: false,
+            });
+            if record.is_settled {
+                return Err(FeeError::FeeAlreadySettled);
+            }
+
+            let old_record = record.clone();
+            record.total_processed = record
+                .total_processed
+                .checked_add(gross_amount)
+                .ok_or(FeeError::ArithmeticOverflow)?;
+            record.protocol_fee_accrued = record
+                .protocol_fee_accrued
+                .checked_add(breakdown.protocol_fee)
+                .ok_or(FeeError::ArithmeticOverflow)?;
+            record.keeper_fee_accrued = record
+                .keeper_fee_accrued
+                .checked_add(breakdown.keeper_fee)
+                .ok_or(FeeError::ArithmeticOverflow)?;
+
+            invariants::assert_record_solvency(&record)?;
+            invariants::assert_accrual_monotonicity(&old_record, &record)?;
+            storage::set_stream_fee(env, &record);
+
+            events::emit_fee_accrued(
+                env,
+                stream_id,
+                gross_amount,
+                breakdown.protocol_fee,
+                breakdown.keeper_fee,
+                breakdown.net_amount,
+            );
+
             total_batch_fees = total_batch_fees
                 .checked_add(breakdown.total_fee)
                 .ok_or(FeeError::ArithmeticOverflow)?;
+            cumulative_proto_fee = cumulative_proto_fee
+                .checked_add(breakdown.protocol_fee)
+                .ok_or(FeeError::ArithmeticOverflow)?;
+            cumulative_keeper_fee = cumulative_keeper_fee
+                .checked_add(breakdown.keeper_fee)
+                .ok_or(FeeError::ArithmeticOverflow)?;
         }
+
+        let total_proto = storage::get_total_protocol_fees(env)
+            .checked_add(cumulative_proto_fee)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+        let total_keeper = storage::get_total_keeper_fees(env)
+            .checked_add(cumulative_keeper_fee)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+        storage::set_total_protocol_fees(env, total_proto);
+        storage::set_total_keeper_fees(env, total_keeper);
 
         Ok(total_batch_fees)
     }
@@ -568,6 +665,72 @@ impl FeeAccrual {
         Ok(())
     }
 
+    /// Batch settle multiple streams with the same guarded, bounded loop model.
+    /// Gated to `fee_collector`, `fee_admin`, or `admin`.
+    pub fn batch_settle_fees(
+        env: Env,
+        caller: Address,
+        stream_ids: Vec<u64>,
+    ) -> Result<u32, FeeError> {
+        caller.require_auth();
+        Self::enter_executing(&env)?;
+
+        let res = Self::batch_settle_fees_inner(&env, &caller, stream_ids);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn batch_settle_fees_inner(
+        env: &Env,
+        caller: &Address,
+        stream_ids: Vec<u64>,
+    ) -> Result<u32, FeeError> {
+        let config = storage::load_config(env)?;
+
+        if caller != &config.fee_collector
+            && caller != &config.fee_admin
+            && caller != &config.admin
+        {
+            return Err(FeeError::UnauthorizedRole);
+        }
+        invariants::assert_batch_bounds(stream_ids.len())?;
+
+        let len = stream_ids.len();
+        for i in 0..len {
+            let id_i = stream_ids.get(i).ok_or(FeeError::EmptyBatch)?;
+            if id_i == 0 {
+                return Err(FeeError::InvalidStreamId);
+            }
+            for j in (i + 1)..len {
+                let id_j = stream_ids.get(j).ok_or(FeeError::EmptyBatch)?;
+                if id_i == id_j {
+                    return Err(FeeError::DuplicateStreamId);
+                }
+            }
+        }
+
+        let mut settled_count: u32 = 0;
+        for i in 0..len {
+            let stream_id = stream_ids.get(i).ok_or(FeeError::EmptyBatch)?;
+            let mut record = storage::get_stream_fee(env, stream_id)
+                .ok_or(FeeError::FeeRecordNotFound)?;
+            if record.is_settled {
+                return Err(FeeError::FeeAlreadySettled);
+            }
+
+            record.is_settled = true;
+            invariants::assert_record_solvency(&record)?;
+            storage::set_stream_fee(env, &record);
+
+            settled_count = settled_count
+                .checked_add(1)
+                .ok_or(FeeError::ArithmeticOverflow)?;
+        }
+
+        Ok(settled_count)
+    }
+
     // -----------------------------------------------------------------------
     // Role Configuration Setters
     // -----------------------------------------------------------------------
@@ -741,6 +904,40 @@ impl FeeAccrual {
 
     pub fn pending_admin(env: Env) -> Option<Address> {
         storage::get_pending_admin(&env)
+    }
+
+    /// Return the canonical human-readable message for an error discriminant.
+    pub fn error_message(env: Env, discriminant: u32) -> String {
+        let msg = match discriminant {
+            1 => FeeError::NotInitialized.message(),
+            2 => FeeError::AlreadyInitialized.message(),
+            3 => FeeError::Unauthorized.message(),
+            4 => FeeError::CallerNotAuthorized.message(),
+            5 => FeeError::NoPendingAdmin.message(),
+            6 => FeeError::InvalidNewAdmin.message(),
+            7 => FeeError::InvalidBpsRate.message(),
+            8 => FeeError::InvalidFeeRecipient.message(),
+            9 => FeeError::InvalidStreamId.message(),
+            10 => FeeError::InvalidTokenAddress.message(),
+            11 => FeeError::ZeroFeeAccrual.message(),
+            12 => FeeError::InsufficientAccruedFees.message(),
+            13 => FeeError::FeeRecordNotFound.message(),
+            14 => FeeError::FeeAlreadySettled.message(),
+            15 => FeeError::ArithmeticOverflow.message(),
+            16 => FeeError::EmptyBatch.message(),
+            17 => FeeError::BatchTooLarge.message(),
+            18 => FeeError::InvariantViolation.message(),
+            19 => FeeError::UnauthorizedRole.message(),
+            20 => FeeError::InvalidRoleAddress.message(),
+            21 => FeeError::ContractPaused.message(),
+            22 => FeeError::ContractNotPaused.message(),
+            23 => FeeError::DuplicateStreamId.message(),
+            24 => FeeError::LengthMismatch.message(),
+            25 => FeeError::InvalidAmount.message(),
+            26 => FeeError::ReentrancyGuard.message(),
+            _ => "",
+        };
+        String::from_str(&env, msg)
     }
 }
 
