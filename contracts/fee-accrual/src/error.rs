@@ -12,9 +12,9 @@ use soroban_sdk::contracterror;
 /// |-------|--------------|----------|---------|
 /// | Initialization | 1–2 | Group A | Contract lifecycle |
 /// | Authorization | 3–6, 19–20 | Group B | Caller identity & role permissions |
-/// | Validation | 7–10, 21 | Group C | Fee configuration and parameter bounds |
+/// | Validation | 7–10, 21, 25 | Group C | Fee configuration and parameter bounds |
 /// | Accounting | 11–14, 22 | Group D | Accrual, claim, and balance states |
-/// | Arithmetic / Limits | 15–18 | Group E | Arithmetic guards and batch bounds |
+/// | Arithmetic / Limits | 15–18, 23–24, 26 | Group E | Arithmetic guards, batch bounds, and re-entrancy |
 ///
 /// Discriminants are part of the public ABI.
 #[contracterror]
@@ -99,6 +99,12 @@ pub enum FeeError {
     LengthMismatch = 24,
     /// Gross accrual amount must be strictly positive (> 0).
     InvalidAmount = 25,
+
+    // -----------------------------------------------------------------------
+    // Re-entrancy Protection (Issue #388)
+    // -----------------------------------------------------------------------
+    /// Re-entrancy guard triggered; concurrent or recursive invocation rejected (Issue #388).
+    ReentrancyGuard = 26,
 }
 
 impl FeeError {
@@ -142,6 +148,9 @@ impl FeeError {
                 "parallel batch input vectors must have identical lengths"
             }
             FeeError::InvalidAmount => "fee accrual gross amount must be strictly positive",
+            FeeError::ReentrancyGuard => {
+                "re-entrancy guard triggered; concurrent or recursive invocation rejected"
+            }
         }
     }
 
@@ -171,7 +180,8 @@ impl FeeError {
             | FeeError::BatchTooLarge
             | FeeError::InvariantViolation
             | FeeError::DuplicateStreamId
-            | FeeError::LengthMismatch => 'E',
+            | FeeError::LengthMismatch
+            | FeeError::ReentrancyGuard => 'E',
         }
     }
 }

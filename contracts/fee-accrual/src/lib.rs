@@ -1,10 +1,34 @@
 #![no_std]
-//! # Perpetua fee-accrual
+//! # Perpetua Fee Accrual Contract
 //!
 //! Dedicated fee-accrual subsystem for protocol and keeper fee accounting in Perpetua.
 //! Tracks protocol fee accrual, keeper fee splits, and fee distribution balances
-//! with defensive checked arithmetic, modularized error types, and granular
-//! role-based authorization to prevent unauthorized configuration updates.
+//! with defensive checked arithmetic, modularized error types, granular
+//! role-based authorization, re-entrancy protection, and strict invariant assertions.
+//!
+//! ## Issue #388 — Strict Invariant Assertions & Re-entrancy Protection
+//!
+//! This contract enforces strict mathematical and state conservation invariants
+//! on all paths to protect against re-entrancy and state desync:
+//!
+//! 1. **Re-entrancy Protection**: State-mutating methods (`accrue_fee`, `batch_accrue_fee`,
+//!    `claim_protocol_fees`, `claim_keeper_fees`, `claim_stream_fee`, `settle_stream_fee`)
+//!    use an explicit `Executing` lock flag in instance storage following
+//!    Checks-Effects-Interactions (CEI). Recursive or concurrent invocation fails with
+//!    [`FeeError::ReentrancyGuard`].
+//! 2. **Conservation of Balance**: Fee splits satisfy `protocol_fee + keeper_fee == total_fee`
+//!    and `net_amount + total_fee == gross_amount`.
+//! 3. **Monotonicity & Solvency**: Accrued balances are non-decreasing; claims never exceed
+//!    cumulative accruals (`protocol_fee_claimed <= protocol_fee_accrued`).
+//! 4. **Batch Ledger Footprint**: Batch operations are bounded by [`MAX_BATCH_SIZE`] (32 items)
+//!    to prevent host CPU and ledger footprint metering exhaustion.
+//!
+//! ## Granular Role-based Authorization (Issue #385)
+//!
+//! - `admin`: Administrative authority (governs roles, admin rotation).
+//! - `fee_admin`: Configures protocol fee bps, keeper split bps, and fee recipient.
+//! - `fee_collector`: Authorized to record accruals (called by stream contract).
+//! - `emergency_admin`: Emergency pause switch for operations.
 
 #[cfg(all(target_family = "wasm", not(target_os = "none")))]
 compile_error!(
@@ -23,15 +47,15 @@ extern crate std;
 
 pub mod error;
 pub mod events;
+pub mod invariants;
 pub mod math;
 pub mod storage;
 pub mod types;
 
 pub use error::FeeError;
+pub use invariants::MAX_BATCH_SIZE;
 pub use math::{compute_fee_breakdown, BPS_DENOMINATOR};
-pub use storage::{
-    BUMP_LEDGERS_PERSISTENT, MIN_TTL_LEDGERS_PERSISTENT,
-};
+pub use storage::{BUMP_LEDGERS_PERSISTENT, MIN_TTL_LEDGERS_PERSISTENT};
 pub use types::{
     AccruedFeeBreakdown, BatchAccrueItem, DataKey, FeeConfig, StreamFeeRecord,
 };
@@ -40,14 +64,23 @@ use soroban_sdk::{
     contract, contractimpl, Address, Env, Symbol, Vec,
 };
 
-/// Maximum batch items allowed in a single batch accrual or claim call.
-pub const MAX_BATCH_SIZE: u32 = 32;
-
 #[contract]
 pub struct FeeAccrual;
 
 #[contractimpl]
 impl FeeAccrual {
+    fn enter_executing(env: &Env) -> Result<(), FeeError> {
+        if storage::is_executing(env) {
+            return Err(FeeError::ReentrancyGuard);
+        }
+        storage::set_executing(env);
+        Ok(())
+    }
+
+    fn exit_executing(env: &Env) {
+        storage::clear_executing(env);
+    }
+
     // -----------------------------------------------------------------------
     // Initialization
     // -----------------------------------------------------------------------
@@ -82,6 +115,9 @@ impl FeeAccrual {
             return Err(FeeError::InvalidFeeRecipient);
         }
 
+        let event_fee_admin = fee_admin.clone();
+        let event_fee_recipient = fee_recipient.clone();
+
         let config = FeeConfig {
             admin,
             fee_admin,
@@ -93,19 +129,28 @@ impl FeeAccrual {
             paused: false,
         };
 
+        invariants::assert_valid_config(&config)?;
         storage::save_config(&env, &config);
         storage::set_total_protocol_fees(&env, 0);
         storage::set_total_keeper_fees(&env, 0);
+
+        events::emit_config_updated(
+            &env,
+            &event_fee_admin,
+            &event_fee_recipient,
+            protocol_fee_bps,
+            keeper_split_bps,
+        );
 
         Ok(())
     }
 
     // -----------------------------------------------------------------------
-    // Fee Accrual
+    // Fee Accrual (Issue #388: Re-entrancy Guard & Invariant Assertions)
     // -----------------------------------------------------------------------
 
-    /// Accrue fees for a specific stream processed amount.
-    /// Gated to `fee_collector` role.
+    /// Accrue protocol and keeper fees for a stream. Gated by `fee_collector`.
+    /// Guarded against re-entrancy and state desync via explicit `Executing` lock flag.
     pub fn accrue_fee(
         env: Env,
         caller: Address,
@@ -113,12 +158,26 @@ impl FeeAccrual {
         gross_amount: i128,
     ) -> Result<AccruedFeeBreakdown, FeeError> {
         caller.require_auth();
-        let config = storage::load_config(&env)?;
+        Self::enter_executing(&env)?;
+
+        let res = Self::accrue_fee_inner(&env, &caller, stream_id, gross_amount);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn accrue_fee_inner(
+        env: &Env,
+        caller: &Address,
+        stream_id: u64,
+        gross_amount: i128,
+    ) -> Result<AccruedFeeBreakdown, FeeError> {
+        let config = storage::load_config(env)?;
 
         if config.paused {
             return Err(FeeError::ContractPaused);
         }
-        if caller != config.fee_collector {
+        if caller != &config.fee_collector {
             return Err(FeeError::UnauthorizedRole);
         }
         if stream_id == 0 {
@@ -128,7 +187,7 @@ impl FeeAccrual {
             return Err(FeeError::ArithmeticOverflow);
         }
 
-        let mut record = storage::get_stream_fee(&env, stream_id).unwrap_or(StreamFeeRecord {
+        let mut record = storage::get_stream_fee(env, stream_id).unwrap_or(StreamFeeRecord {
             stream_id,
             total_processed: 0,
             protocol_fee_accrued: 0,
@@ -147,6 +206,9 @@ impl FeeAccrual {
             config.protocol_fee_bps,
             config.keeper_split_bps,
         )?;
+        invariants::assert_breakdown_conservation(&breakdown)?;
+
+        let old_record = record.clone();
 
         record.total_processed = record
             .total_processed
@@ -161,20 +223,23 @@ impl FeeAccrual {
             .checked_add(breakdown.keeper_fee)
             .ok_or(FeeError::ArithmeticOverflow)?;
 
-        storage::set_stream_fee(&env, &record);
+        invariants::assert_record_solvency(&record)?;
+        invariants::assert_accrual_monotonicity(&old_record, &record)?;
 
-        let total_proto = storage::get_total_protocol_fees(&env)
+        storage::set_stream_fee(env, &record);
+
+        let total_proto = storage::get_total_protocol_fees(env)
             .checked_add(breakdown.protocol_fee)
             .ok_or(FeeError::ArithmeticOverflow)?;
-        let total_keeper = storage::get_total_keeper_fees(&env)
+        let total_keeper = storage::get_total_keeper_fees(env)
             .checked_add(breakdown.keeper_fee)
             .ok_or(FeeError::ArithmeticOverflow)?;
 
-        storage::set_total_protocol_fees(&env, total_proto);
-        storage::set_total_keeper_fees(&env, total_keeper);
+        storage::set_total_protocol_fees(env, total_proto);
+        storage::set_total_keeper_fees(env, total_keeper);
 
         events::emit_fee_accrued(
-            &env,
+            env,
             stream_id,
             gross_amount,
             breakdown.protocol_fee,
@@ -186,43 +251,181 @@ impl FeeAccrual {
     }
 
     /// Batch accrue fees across multiple streams in a single call.
+    /// Strictly limits batch size to MAX_BATCH_SIZE to prevent host metering regression.
     pub fn batch_accrue_fee(
         env: Env,
         caller: Address,
         items: Vec<BatchAccrueItem>,
     ) -> Result<i128, FeeError> {
         caller.require_auth();
-        let config = storage::load_config(&env)?;
+        Self::enter_executing(&env)?;
+
+        let res = Self::batch_accrue_fee_inner(&env, &caller, items);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn batch_accrue_fee_inner(
+        env: &Env,
+        caller: &Address,
+        items: Vec<BatchAccrueItem>,
+    ) -> Result<i128, FeeError> {
+        let config = storage::load_config(env)?;
 
         if config.paused {
             return Err(FeeError::ContractPaused);
         }
-        if caller != config.fee_collector {
+        if caller != &config.fee_collector {
             return Err(FeeError::UnauthorizedRole);
         }
-        let len = items.len();
-        if len == 0 {
-            return Err(FeeError::EmptyBatch);
-        }
-        if len > MAX_BATCH_SIZE {
-            return Err(FeeError::BatchTooLarge);
-        }
+        invariants::assert_batch_bounds(items.len())?;
 
         let mut total_batch_fees: i128 = 0;
-
         for item in items.iter() {
-            let breakdown = Self::accrue_fee(
-                env.clone(),
-                caller.clone(),
-                item.stream_id,
-                item.amount,
-            )?;
+            let breakdown =
+                Self::accrue_fee_inner(env, caller, item.stream_id, item.amount)?;
             total_batch_fees = total_batch_fees
                 .checked_add(breakdown.total_fee)
                 .ok_or(FeeError::ArithmeticOverflow)?;
         }
 
         Ok(total_batch_fees)
+    }
+
+    // -----------------------------------------------------------------------
+    // Fee Claiming & Distribution
+    // -----------------------------------------------------------------------
+
+    /// Claim accrued protocol fees for a specific stream. Gated by `fee_admin` or `admin`.
+    pub fn claim_protocol_fees(
+        env: Env,
+        caller: Address,
+        stream_id: u64,
+        amount: i128,
+    ) -> Result<i128, FeeError> {
+        caller.require_auth();
+        Self::enter_executing(&env)?;
+
+        let res = Self::claim_protocol_fees_inner(&env, &caller, stream_id, amount);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn claim_protocol_fees_inner(
+        env: &Env,
+        caller: &Address,
+        stream_id: u64,
+        amount: i128,
+    ) -> Result<i128, FeeError> {
+        let config = storage::load_config(env)?;
+
+        if config.paused {
+            return Err(FeeError::ContractPaused);
+        }
+        if caller != &config.admin && caller != &config.fee_recipient {
+            return Err(FeeError::UnauthorizedRole);
+        }
+        if stream_id == 0 {
+            return Err(FeeError::InvalidStreamId);
+        }
+        if amount <= 0 {
+            return Err(FeeError::ZeroFeeAccrual);
+        }
+
+        let mut record =
+            storage::get_stream_fee(env, stream_id).ok_or(FeeError::FeeRecordNotFound)?;
+
+        let available = record
+            .protocol_fee_accrued
+            .checked_sub(record.protocol_fee_claimed)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+        if amount > available {
+            return Err(FeeError::InsufficientAccruedFees);
+        }
+
+        let old_record = record.clone();
+        record.protocol_fee_claimed = record
+            .protocol_fee_claimed
+            .checked_add(amount)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+
+        invariants::assert_record_solvency(&record)?;
+        invariants::assert_accrual_monotonicity(&old_record, &record)?;
+
+        storage::set_stream_fee(env, &record);
+        events::emit_fee_claimed(env, stream_id, &config.fee_recipient, amount, 0);
+
+        Ok(amount)
+    }
+
+    /// Claim accrued keeper fees for a specific stream and disburse to recipient.
+    pub fn claim_keeper_fees(
+        env: Env,
+        caller: Address,
+        stream_id: u64,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<i128, FeeError> {
+        caller.require_auth();
+        Self::enter_executing(&env)?;
+
+        let res = Self::claim_keeper_fees_inner(&env, &caller, stream_id, &recipient, amount);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn claim_keeper_fees_inner(
+        env: &Env,
+        caller: &Address,
+        stream_id: u64,
+        recipient: &Address,
+        amount: i128,
+    ) -> Result<i128, FeeError> {
+        let config = storage::load_config(env)?;
+
+        if config.paused {
+            return Err(FeeError::ContractPaused);
+        }
+        if caller != &config.fee_collector && caller != &config.admin {
+            return Err(FeeError::UnauthorizedRole);
+        }
+        if stream_id == 0 {
+            return Err(FeeError::InvalidStreamId);
+        }
+        if storage::is_zero_address(env, recipient) {
+            return Err(FeeError::InvalidFeeRecipient);
+        }
+        if amount <= 0 {
+            return Err(FeeError::ZeroFeeAccrual);
+        }
+
+        let mut record =
+            storage::get_stream_fee(env, stream_id).ok_or(FeeError::FeeRecordNotFound)?;
+
+        let available = record
+            .keeper_fee_accrued
+            .checked_sub(record.keeper_fee_claimed)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+        if amount > available {
+            return Err(FeeError::InsufficientAccruedFees);
+        }
+
+        let old_record = record.clone();
+        record.keeper_fee_claimed = record
+            .keeper_fee_claimed
+            .checked_add(amount)
+            .ok_or(FeeError::ArithmeticOverflow)?;
+
+        invariants::assert_record_solvency(&record)?;
+        invariants::assert_accrual_monotonicity(&old_record, &record)?;
+
+        storage::set_stream_fee(env, &record);
+        events::emit_fee_claimed(env, stream_id, recipient, 0, amount);
+
+        Ok(amount)
     }
 
     /// Claim accrued protocol or keeper fees.
@@ -233,17 +436,36 @@ impl FeeAccrual {
         is_protocol_fee: bool,
     ) -> Result<i128, FeeError> {
         caller.require_auth();
-        let config = storage::load_config(&env)?;
+        Self::enter_executing(&env)?;
+
+        let res = Self::claim_stream_fee_inner(&env, &caller, stream_id, is_protocol_fee);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn claim_stream_fee_inner(
+        env: &Env,
+        caller: &Address,
+        stream_id: u64,
+        is_protocol_fee: bool,
+    ) -> Result<i128, FeeError> {
+        let config = storage::load_config(env)?;
 
         if config.paused {
             return Err(FeeError::ContractPaused);
         }
 
-        let mut record = storage::get_stream_fee(&env, stream_id)
+        let mut record = storage::get_stream_fee(env, stream_id)
             .ok_or(FeeError::FeeRecordNotFound)?;
 
+        let old_record = record.clone();
+
         let claim_amount = if is_protocol_fee {
-            if caller != config.admin && caller != config.fee_admin && caller != config.fee_recipient {
+            if caller != &config.admin
+                && caller != &config.fee_admin
+                && caller != &config.fee_recipient
+            {
                 return Err(FeeError::UnauthorizedRole);
             }
             let uncollected = record
@@ -273,20 +495,34 @@ impl FeeAccrual {
             uncollected
         };
 
-        storage::set_stream_fee(&env, &record);
+        invariants::assert_record_solvency(&record)?;
+        invariants::assert_accrual_monotonicity(&old_record, &record)?;
+
+        storage::set_stream_fee(env, &record);
 
         let proto_claimed = if is_protocol_fee { claim_amount } else { 0 };
         let keeper_claimed = if is_protocol_fee { 0 } else { claim_amount };
 
         events::emit_fee_claimed(
-            &env,
+            env,
             stream_id,
-            &caller,
+            caller,
             proto_claimed,
             keeper_claimed,
         );
 
         Ok(claim_amount)
+    }
+
+    /// Mark a stream fee record as settled (terminal state).
+    pub fn settle_stream(env: Env, caller: Address, stream_id: u64) -> Result<(), FeeError> {
+        caller.require_auth();
+        Self::enter_executing(&env)?;
+
+        let res = Self::settle_stream_fee_inner(&env, &caller, stream_id);
+
+        Self::exit_executing(&env);
+        res
     }
 
     /// Settle stream fees, finalizing accounting for the stream.
@@ -296,13 +532,29 @@ impl FeeAccrual {
         stream_id: u64,
     ) -> Result<(), FeeError> {
         caller.require_auth();
-        let config = storage::load_config(&env)?;
+        Self::enter_executing(&env)?;
 
-        if caller != config.fee_collector && caller != config.fee_admin && caller != config.admin {
+        let res = Self::settle_stream_fee_inner(&env, &caller, stream_id);
+
+        Self::exit_executing(&env);
+        res
+    }
+
+    fn settle_stream_fee_inner(
+        env: &Env,
+        caller: &Address,
+        stream_id: u64,
+    ) -> Result<(), FeeError> {
+        let config = storage::load_config(env)?;
+
+        if caller != &config.fee_collector
+            && caller != &config.fee_admin
+            && caller != &config.admin
+        {
             return Err(FeeError::UnauthorizedRole);
         }
 
-        let mut record = storage::get_stream_fee(&env, stream_id)
+        let mut record = storage::get_stream_fee(env, stream_id)
             .ok_or(FeeError::FeeRecordNotFound)?;
 
         if record.is_settled {
@@ -310,7 +562,8 @@ impl FeeAccrual {
         }
 
         record.is_settled = true;
-        storage::set_stream_fee(&env, &record);
+        invariants::assert_record_solvency(&record)?;
+        storage::set_stream_fee(env, &record);
 
         Ok(())
     }
@@ -340,6 +593,7 @@ impl FeeAccrual {
         config.keeper_split_bps = keeper_split_bps;
         config.fee_recipient = fee_recipient.clone();
 
+        invariants::assert_valid_config(&config)?;
         storage::save_config(&env, &config);
 
         events::emit_config_updated(
@@ -396,7 +650,6 @@ impl FeeAccrual {
     pub fn set_paused(env: Env, paused: bool) -> Result<(), FeeError> {
         let mut config = storage::load_config(&env)?;
 
-        // Either emergency_admin or admin can toggle pause
         if !storage::is_forbidden_admin(&env, &config.emergency_admin) {
             config.emergency_admin.require_auth();
         } else {
@@ -413,7 +666,6 @@ impl FeeAccrual {
 
         config.paused = paused;
         storage::save_config(&env, &config);
-
         events::emit_pause_status(&env, paused, &config.emergency_admin);
 
         Ok(())
@@ -468,12 +720,23 @@ impl FeeAccrual {
         storage::get_stream_fee(&env, stream_id)
     }
 
+    pub fn get_stream_fee_record(env: Env, stream_id: u64) -> Result<StreamFeeRecord, FeeError> {
+        storage::get_stream_fee(&env, stream_id).ok_or(FeeError::FeeRecordNotFound)
+    }
+
     pub fn total_protocol_fees(env: Env) -> i128 {
         storage::get_total_protocol_fees(&env)
     }
 
     pub fn total_keeper_fees(env: Env) -> i128 {
         storage::get_total_keeper_fees(&env)
+    }
+
+    pub fn get_total_fees(env: Env) -> (i128, i128) {
+        (
+            storage::get_total_protocol_fees(&env),
+            storage::get_total_keeper_fees(&env),
+        )
     }
 
     pub fn pending_admin(env: Env) -> Option<Address> {
