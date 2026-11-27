@@ -1,36 +1,21 @@
-//! Shared test harness and mock contracts for stream-nft testing.
+//! Shared test harness for stream-nft.
 
 use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{contract, contractimpl, Address, Env, String};
+use soroban_sdk::{Address, Env, String};
 
-use crate::{Config, StreamNft, StreamNftClient};
+use crate::{StreamNft, StreamNftClient};
 
 pub const T0: u64 = 1_700_000_000;
-
-#[contract]
-pub struct MockStreamContract;
-
-#[contractimpl]
-impl MockStreamContract {
-    pub fn transfer_recipient(env: Env, stream_id: u64, to: Address) {
-        if stream_id == 999_999 {
-            panic!("stream rejected: non-existent stream");
-        }
-        if stream_id == 888_888 {
-            panic!("stream rejected: not transferable");
-        }
-        env.storage().persistent().set(&stream_id, &to);
-    }
-}
+pub const DAY: u64 = 86_400;
 
 pub struct Harness<'a> {
     pub env: Env,
     pub client: StreamNftClient<'a>,
     pub contract_id: Address,
     pub stream_contract: Address,
-    pub alice: Address,
-    pub bob: Address,
-    pub charlie: Address,
+    pub user1: Address,
+    pub user2: Address,
+    pub user3: Address,
 }
 
 impl<'a> Harness<'a> {
@@ -42,36 +27,40 @@ impl<'a> Harness<'a> {
         let contract_id = env.register(StreamNft, ());
         let client = StreamNftClient::new(&env, &contract_id);
 
-        let stream_contract = env.register(MockStreamContract, ());
+        let stream_contract = Address::generate(&env);
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        let user3 = Address::generate(&env);
 
-        let alice = Address::generate(&env);
-        let bob = Address::generate(&env);
-        let charlie = Address::generate(&env);
+        let name = String::from_str(&env, "Perpetua Stream NFT");
+        let symbol = String::from_str(&env, "PSTREAM");
 
-        client.init(
-            &stream_contract,
-            &String::from_str(&env, "Perpetua Stream NFT"),
-            &String::from_str(&env, "PSTREAM"),
-        );
+        client.init(&stream_contract, &name, &symbol);
 
         Harness {
             env,
             client,
             contract_id,
             stream_contract,
-            alice,
-            bob,
-            charlie,
+            user1,
+            user2,
+            user3,
         }
     }
 
     pub fn advance(&self, seconds: u64) {
         let info = self.env.ledger().get();
-        self.env.ledger().set_timestamp(info.timestamp + seconds);
-        let ledgers = ((seconds + 4) / 5) as u32;
+        self.env
+            .ledger()
+            .set_timestamp(info.timestamp.saturating_add(seconds));
+        let ledgers = ((seconds.saturating_add(4)) / 5) as u32;
         self.env
             .ledger()
             .set_sequence_number(info.sequence_number.saturating_add(ledgers));
+    }
+
+    pub fn set_timestamp(&self, timestamp: u64) {
+        self.env.ledger().set_timestamp(timestamp);
     }
 
     pub fn now(&self) -> u64 {

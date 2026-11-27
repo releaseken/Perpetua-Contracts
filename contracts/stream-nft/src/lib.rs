@@ -1,5 +1,5 @@
 #![no_std]
-//! # Perpetua stream-NFT — represent stream recipient claims as tokens (#123, #367, #368, #370, #371, #373)
+//! # Perpetua stream-NFT — represent stream recipient claims as tokens (#123, #367, #368, #370, #371, #373, #374, #375, #376, #382)
 //!
 //! Thin non-fungible wrapper over a single Perpetua stream instance. A stream
 //! that was created with `transferable = true` can be minted into an NFT keyed
@@ -78,6 +78,12 @@
 //!   to individual `transfer_recipient(stream_id, to)` calls.
 //! * Coalescing cross-contract sub-invocations collapses N VM context switches into 1, dramatically
 //!   reducing metering consumption and call frame stack depth during batch claim settlements.
+//!
+//! ## Timestamp and Vesting Boundary Fuzzing (#374, #375)
+//!
+//! Vesting arithmetic is kept in `crate::math` and fuzzed across `u64` timestamp and
+//! stream-id boundaries so paused, cliffed, and matured streams conserve deposits
+//! without overflow or precision loss.
 
 #[cfg(all(target_family = "wasm", not(target_os = "none")))]
 compile_error!("stream-NFT production WASM must be built for wasm32v1-none.");
@@ -87,6 +93,7 @@ extern crate std;
 
 pub mod errors;
 pub mod invariants;
+pub mod math;
 
 pub use errors::Error;
 pub use invariants::*;

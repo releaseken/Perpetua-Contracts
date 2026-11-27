@@ -12,8 +12,9 @@
 //!   held in local contiguous memory rather than repeatedly decoded across loop iterations.
 //!
 //! * **I2 (Persistence Without Extension)**:
-//!   The archival canary entry [`Key::Canary`] and standard partition probe entries [`Key::Probe`]
-//!   deliberately receive no TTL extension during `plant`, `read`, `batch_plant`, or `batch_read`.
+//!   The archival canary entry [`Key::Canary`], standard partition probe entries [`Key::Probe`],
+//!   and batch claim probe entries [`Key::ClaimProbe`] deliberately receive no TTL extension during
+//!   `plant`, `read`, `batch_plant`, `batch_read`, `batch_claim_probe`, or `batch_get_claim_probes`.
 //!   This guarantees that test entries archive early at `min_persistent_ttl` according to network protocol rules.
 //!
 //! * **I3 (Automated Instance & Entry Lifetime Resilience)**:
@@ -44,9 +45,21 @@
 //! * **I8 (Error Observability & Categorization)**:
 //!   All failure modes must be mapped to stable, typed error discriminants with canonical
 //!   human-readable messages and semantic error categories for client SDK observability.
+//!
+//! * **I9 (Fractional Withdrawal Conservation Identity)**:
+//!   For any fractional split of amount $T$ with fraction $N/D$, payout $P$ and remainder $R$
+//!   satisfy $P + R = T$ with no intermediate overflow or precision loss.
+//!
+//! * **I10 (Granular Role Partitioning)**:
+//!   Configuration authority is split across `Admin`, `ConfigAdmin`, `EmergencyGuardian`, and
+//!   `Operator` roles; no role may be assigned to the zero address or the contract itself.
 
-use crate::{ProbeRecord, MAX_BATCH_PROBE_SIZE};
-use soroban_sdk::Symbol;
+use crate::math::FractionalSplit;
+use crate::{
+    ClaimProbeRecord, Key, ProbeError, ProbeRecord, Role, BUMP_AMOUNT_LEDGERS,
+    LIFETIME_THRESHOLD_LEDGERS, MAX_BATCH_PROBE_SIZE,
+};
+use soroban_sdk::{Address, Env, Symbol};
 
 /// Verify that a batch size does not exceed the allowed threshold.
 #[inline(always)]
@@ -118,4 +131,33 @@ pub fn extend_persistent_entry(env: &Env, key: &Key) {
     let threshold = LIFETIME_THRESHOLD_LEDGERS.min(max_ttl);
     let bump = BUMP_AMOUNT_LEDGERS.min(max_ttl);
     env.storage().persistent().extend_ttl(key, threshold, bump);
+}
+
+/// Assert that the claim probe record preserves original stream claim data across checks.
+#[inline(always)]
+pub fn assert_claim_probe_integrity(
+    record: &ClaimProbeRecord,
+    expected_stream_id: u64,
+    expected_amount: i128,
+    expected_claimant: &Address,
+) -> bool {
+    record.stream_id == expected_stream_id
+        && record.amount == expected_amount
+        && record.claimant == *expected_claimant
+}
+
+/// Formally assert the fractional withdrawal conservation invariant:
+/// `split.payout + split.remainder == split.total`.
+#[inline(always)]
+pub fn assert_fractional_conservation(split: &FractionalSplit) -> bool {
+    split.assert_conservation()
+}
+
+/// Check role partition validity.
+#[inline(always)]
+pub fn is_valid_role(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Admin | Role::ConfigAdmin | Role::EmergencyGuardian | Role::Operator
+    )
 }
