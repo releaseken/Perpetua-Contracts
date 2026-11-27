@@ -26,3 +26,20 @@
 //! * **I5 (Deterministic Deployment and Admin Safety)**:
 //!   Admin address must never be the zero address (`G...WHF`) or the factory's own contract address.
 //!   Stream salts are deterministic, length-fixed, and collision-resistant across all `(sender, nonce, stream_id)` tuples.
+//!
+//! * **I6 (Granular Role-Based Authorization and Role Independence)**:
+//!   Configuration updates are partitioned across orthogonal roles:
+//!   - `Admin`: Assigns and rotates roles (`admin`, `emergency_admin`, `parameter_admin`, `allowlist_admin`).
+//!   - `EmergencyAdmin`: Controls creation pause status (`set_pause`, `set_factory_paused`).
+//!   - `ParameterAdmin`: Controls stream policy parameters (`set_cap`, `set_min_duration`, `set_max_duration`, `set_batch_cap_enforcement`, `set_rate_bounds`, `set_max_active_streams`, `set_rate_limit`).
+//!   - `AllowlistAdmin`: Controls recipient and token allowlists (`set_allowlist`, `set_allowlist_enabled`, `set_token_allowed`).
+//!   The admin also retains supreme authority over all operations to allow unified governance.
+//!   Each role holder must not be the zero address or the factory's own contract address.
+//!   Role changes emit auditable `RoleUpdated` events and are immediately effective.
+//!
+//! * **I7 (Host CPU Instruction Minimization & Loop Deserialization Optimization)**:
+//!   All loop processing over collections, parameters, or storage keys avoids redundant host
+//!   deserialization round-trips. Input vectors are validated and deserialized in a single pass;
+//!   shared state and environment parameters (such as `Env::ledger().sequence()`, `Env::ledger().timestamp()`,
+//!   or factory configuration) are hoisted outside loop scopes. All counting and boundary checks
+//!   enforce checked arithmetic to guarantee metering predictability and safety.

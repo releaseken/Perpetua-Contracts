@@ -18,7 +18,10 @@ fn retried_pause_after_lost_response_keeps_a_single_cycle() {
 
     let config = h.client.get_config().unwrap();
     assert!(config.paused);
-    assert_eq!(config.cycle_count, 1, "a rejected retry must not start a new cycle");
+    assert_eq!(
+        config.cycle_count, 1,
+        "a rejected retry must not start a new cycle"
+    );
 }
 
 #[test]
@@ -34,7 +37,10 @@ fn retried_resume_after_lost_response_does_not_double_count() {
 
     let config = h.client.get_config().unwrap();
     assert!(!config.paused);
-    assert_eq!(config.paused_total, 300, "the paused interval must be counted once");
+    assert_eq!(
+        config.paused_total, 300,
+        "the paused interval must be counted once"
+    );
 }
 
 #[test]

@@ -124,7 +124,10 @@ fn set_stream_contract_rejects_zero_address() {
         &h.env,
         "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
     ));
-    let err = h.client.try_set_stream_contract(&zero).unwrap_err().unwrap();
+    let err = h
+        .client
+        .try_set_stream_contract(&zero)
+        .unwrap_err()
+        .unwrap();
     assert_eq!(err, crate::Error::InvalidStreamContract);
-}
 }

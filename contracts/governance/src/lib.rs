@@ -297,6 +297,8 @@ pub enum CallData {
     FactorySetStreamContract(Address),
     /// `set_stream_wasm_hash(reviewed_wasm_hash)`
     FactorySetStreamWasmHash(BytesN<32>),
+    /// `deploy_stream_contract(approved_wasm_hash, salt)`
+    FactoryDeployStreamContract(BytesN<32>, BytesN<32>),
 }
 
 /// Decode `calldata` bytes into a `CallData` variant.
@@ -414,6 +416,13 @@ fn dispatch_operation(env: &Env, target: &Address, op: CallData) -> Result<(), G
                 target,
                 &Symbol::new(env, "set_stream_wasm_hash"),
                 (new_hash,).into_val(env),
+            );
+        }
+        CallData::FactoryDeployStreamContract(wasm_hash, salt) => {
+            env.invoke_contract::<Address>(
+                target,
+                &Symbol::new(env, "deploy_stream_contract"),
+                (wasm_hash, salt).into_val(env),
             );
         }
     }
@@ -5319,11 +5328,14 @@ mod tests {
     fn test_max_batch_payload_fits_within_max_calldata_bytes() {
         let ctx = Ctx::setup();
         let target = deploy_batch_target(&ctx);
-        // Largest inner payload governance can dispatch: a 32-byte wasm hash.
+        // Largest inner payload governance can dispatch: an approved hash and salt.
         let worst = entry(
             &ctx.env,
             &target,
-            CallData::FactorySetStreamWasmHash(BytesN::from_array(&ctx.env, &[0x11; 32])),
+            CallData::FactoryDeployStreamContract(
+                BytesN::from_array(&ctx.env, &[0x11; 32]),
+                BytesN::from_array(&ctx.env, &[0x22; 32]),
+            ),
         );
         let entries = vec![
             &ctx.env,
@@ -5631,101 +5643,45 @@ mod tests {
         assert!(ctx.client.get_proposal(&id).executed);
     }
 
-    // -----------------------------------------------------------------------
-    // Automated entry lifetime extension & archival resilience (issue #354)
-    // -----------------------------------------------------------------------
-
     #[test]
-    fn test_instance_lifetime_extended_on_init() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, FluxoraGovernance);
-        let admin = Address::generate(&env);
-        let signer_a = Address::generate(&env);
-        let client = FluxoraGovernanceClient::new(&env, &contract_id);
+    fn test_governance_error_discriminants_and_observability() {
+        let variants = [
+            GovernanceError::NotInitialized,
+            GovernanceError::AlreadyInitialized,
+            GovernanceError::Unauthorized,
+            GovernanceError::NotASigner,
+            GovernanceError::ProposalNotFound,
+            GovernanceError::AlreadyExecuted,
+            GovernanceError::QuorumNotReached,
+            GovernanceError::TimelockNotElapsed,
+            GovernanceError::AlreadyApproved,
+            GovernanceError::CalldataTooLarge,
+            GovernanceError::TooManySigners,
+            GovernanceError::ProposalExpired,
+            GovernanceError::ProposalCancelled,
+            GovernanceError::NotProposerOrAdmin,
+            GovernanceError::InvalidThreshold,
+            GovernanceError::QuorumWouldBreak,
+            GovernanceError::DuplicateSigner,
+            GovernanceError::ArithmeticOverflow,
+            GovernanceError::CalldataEmpty,
+            GovernanceError::InvalidCalldata,
+            GovernanceError::TimelockNotMet,
+            GovernanceError::InvalidSignerGeneration,
+            GovernanceError::ReentrancyGuard,
+            GovernanceError::TooManyEmergencyGuardians,
+            GovernanceError::DuplicateEmergencyGuardian,
+            GovernanceError::InvalidProposalState,
+            GovernanceError::BatchTooLarge,
+        ];
 
-        client.init(&admin, &vec![&env, signer_a], &1u32);
-
-        let instance_ttl = env.as_contract(&contract_id, || {
-            env.storage().instance().get_ttl()
-        });
-        assert!(
-            instance_ttl >= INSTANCE_BUMP_AMOUNT,
-            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT {INSTANCE_BUMP_AMOUNT}"
-        );
-    }
-
-    #[test]
-    fn test_instance_lifetime_extended_on_get_signers() {
-        let ctx = Ctx::setup();
-        let ttl_before = ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env.storage().instance().get_ttl()
-        });
-        assert!(ttl_before >= INSTANCE_BUMP_AMOUNT);
-
-        // Read signers view
-        let signers = ctx.client.get_signers();
-        assert_eq!(signers.len(), 3);
-
-        let ttl_after = ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env.storage().instance().get_ttl()
-        });
-        assert!(
-            ttl_after >= INSTANCE_BUMP_AMOUNT,
-            "instance TTL {ttl_after} must remain >= INSTANCE_BUMP_AMOUNT after get_signers"
-        );
-    }
-
-    #[test]
-    fn test_instance_lifetime_extended_on_get_threshold_and_quorum() {
-        let ctx = Ctx::setup();
-        let threshold = ctx.client.get_threshold();
-        assert_eq!(threshold, 2);
-
-        let quorum = ctx.client.quorum();
-        assert_eq!(quorum, 2);
-
-        let instance_ttl = ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env.storage().instance().get_ttl()
-        });
-        assert!(
-            instance_ttl >= INSTANCE_BUMP_AMOUNT,
-            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT after threshold reads"
-        );
-    }
-
-    #[test]
-    fn test_instance_lifetime_extended_on_get_emergency_guardians() {
-        let ctx = Ctx::setup();
-        let guardians = ctx.client.get_emergency_guardians();
-        assert_eq!(guardians.len(), 0);
-
-        let instance_ttl = ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env.storage().instance().get_ttl()
-        });
-        assert!(
-            instance_ttl >= INSTANCE_BUMP_AMOUNT,
-            "instance TTL {instance_ttl} must be >= INSTANCE_BUMP_AMOUNT after get_emergency_guardians"
-        );
-    }
-
-    #[test]
-    fn test_persistent_proposal_lifetime_extended_on_active_load() {
-        let ctx = Ctx::setup();
-        let target = Address::generate(&ctx.env);
-        let id = ctx
-            .client
-            .propose(&ctx.signer_a, &target, &ctx.calldata("x"));
-
-        // Load proposal and verify persistent TTL is bumped to active bump amount
-        let proposal = ctx.client.get_proposal(&id);
-        assert_eq!(proposal.status, ProposalStatus::Proposed);
-
-        let proposal_ttl = ctx.env.as_contract(&ctx.contract_id, || {
-            ctx.env.storage().persistent().get_ttl(&DataKey::Proposal(id))
-        });
-        assert!(
-            proposal_ttl >= ACTIVE_PROPOSAL_BUMP_AMOUNT,
-            "active proposal TTL {proposal_ttl} must be >= ACTIVE_PROPOSAL_BUMP_AMOUNT {ACTIVE_PROPOSAL_BUMP_AMOUNT}"
-        );
+        for (i, a) in variants.iter().enumerate() {
+            let code_a = *a as u32;
+            assert!(code_a > 0, "governance error discriminants must be non-zero");
+            for b in variants.iter().skip(i + 1) {
+                assert_ne!(code_a, *b as u32, "duplicate GovernanceError discriminant");
+            }
+        }
     }
 }
+

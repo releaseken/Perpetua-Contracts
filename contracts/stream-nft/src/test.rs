@@ -1,3 +1,5 @@
+//! Invariant assertions, re-entrancy protection, and property tests for stream-nft.
+
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},

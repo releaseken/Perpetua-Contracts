@@ -12,7 +12,8 @@
 //! | **Group C** | Authorization | `NotOwner (4)`, `Unauthorized (11)` | Ownership & auth gating |
 //! | **Group D** | Cross-Contract | `StreamRejected (5)`, `StreamCallFailed (12)` | Invocations against stream contract |
 //! | **Group E** | Batch / Protocol | `EmptyBatch (6)`, `BatchTooLarge (7)`, `DuplicateTokenId (8)`, `MalformedTokenId (9)` | Batch parameter validation |
-//! | **Group F** | Arithmetic | `ArithmeticOverflow (10)` | Checked math overflows |
+//! | **Group F** | Arithmetic | `ArithmeticOverflow (10)`, `Overflow (16)` | Checked math overflows |
+//! | **Group G** | Execution Safety | `ReentrancyGuard (13)`, `InvariantViolation (14)`, `RepeatedTransfer (15)` | Re-entrancy and invariant guards |
 //!
 //! Discriminants are part of the frozen public ABI. Never renumber existing variants.
 
@@ -61,6 +62,16 @@ pub enum Error {
     Unauthorized = 11,
     /// Cross-contract invocation to stream contract failed to return or terminated abnormally.
     StreamCallFailed = 12,
+
+    // --- Group G: Execution Safety (from origin/main stream-NFT hardening) ---
+    /// A state-modifying operation was re-entered while the guard was held.
+    ReentrancyGuard = 13,
+    /// A core ownership or balance invariant was violated.
+    InvariantViolation = 14,
+    /// A self-transfer or repeated transfer was rejected.
+    RepeatedTransfer = 15,
+    /// Checked supply or balance arithmetic overflowed.
+    Overflow = 16,
 }
 
 impl Error {
@@ -76,7 +87,8 @@ impl Error {
             | Self::BatchTooLarge
             | Self::DuplicateTokenId
             | Self::MalformedTokenId => 'E',
-            Self::ArithmeticOverflow => 'F',
+            Self::ArithmeticOverflow | Self::Overflow => 'F',
+            Self::ReentrancyGuard | Self::InvariantViolation | Self::RepeatedTransfer => 'G',
         }
     }
 
@@ -98,6 +110,10 @@ impl Error {
             Self::ArithmeticOverflow => "checked arithmetic overflow or underflow occurred",
             Self::Unauthorized => "caller is not authorized for this operation",
             Self::StreamCallFailed => "cross-contract invocation to stream contract failed",
+            Self::ReentrancyGuard => "re-entrant state-modifying invocation was rejected",
+            Self::InvariantViolation => "stream-NFT ownership or balance invariant was violated",
+            Self::RepeatedTransfer => "self-transfer or repeated transfer was rejected",
+            Self::Overflow => "checked supply or balance arithmetic overflowed",
         }
     }
 

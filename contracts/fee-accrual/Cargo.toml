@@ -2,13 +2,11 @@
 #
 # Dedicated fee-accrual subsystem for protocol and keeper fee accounting in Perpetua.
 # Tracks protocol fee accrual, keeper fee splits, and fee distribution balances
-# with defensive checked arithmetic, modularized error types, and granular
-# role-based authorization to prevent unauthorized configuration updates.
+# with defensive checked arithmetic, modularized error types, and custom error messages
+# for enhanced client observability.
 #
-# Issue #385: feat(contracts/fee-accrual): add granular role-based authorization
-# to fee-accrual to prevent unauthorized configuration updates.
-# Issue #390: feat(contracts/fee-accrual): implement automated entry lifetime
-# extension for fee-accrual to guarantee archival resilience.
+# Issue #389: modularize error types and custom error messages in fee-accrual for enhanced
+# client observability.
 #
 #   cargo build  --target wasm32v1-none --release
 #   cargo test
